@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --color-bg: 11 13 16;
+    --color-panel: 20 24 29;
+    --color-panel2: 27 32 39;
+    --color-border: 38 44 52;
+    --color-ink: 231 235 240;
+    --color-muted: 139 148 163;
+    --color-accent: 224 122 95;
+    --color-ok: 123 179 137;
+    --color-warn: 214 165 96;
+    --color-err: 214 100 95;
+  }
+  :root.light {
+    color-scheme: light;
+    --color-bg: 247 248 250;
+    --color-panel: 255 255 255;
+    --color-panel2: 238 240 243;
+    --color-border: 216 221 227;
+    --color-ink: 26 29 34;
+    --color-muted: 94 103 115;
+    --color-accent: 199 93 63;
+    --color-ok: 77 142 98;
+    --color-warn: 184 128 48;
+    --color-err: 185 67 62;
+  }
+  html, body, #app {
+    height: 100%;
+  }
+  body {
+    background-color: rgb(var(--color-bg));
+    color: rgb(var(--color-ink));
+    font-feature-settings: "tnum", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+    font-family: theme("fontFamily.mono");
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-panel border border-border rounded-lg p-4;
+  }
+  .card-title {
+    @apply text-muted text-xs uppercase tracking-wider mb-2;
+  }
+  .pill {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs border border-border bg-panel2 text-muted;
+  }
+  .pill-warn { @apply text-warn border-warn/40; }
+  .pill-err  { @apply text-err border-err/40; }
+  .pill-ok   { @apply text-ok border-ok/40; }
+  .btn {
+    @apply inline-flex items-center px-3 py-1.5 rounded-md text-sm bg-panel2 border border-border hover:bg-border;
+  }
+  .btn-accent {
+    @apply bg-accent/90 hover:bg-accent text-bg border-transparent;
+  }
+  .row-hover { @apply hover:bg-panel2 cursor-pointer; }
+  .bar {
+    @apply h-2 rounded-sm bg-border overflow-hidden;
+  }
+  .bar > .fill {
+    @apply h-full bg-accent;
+  }
+}

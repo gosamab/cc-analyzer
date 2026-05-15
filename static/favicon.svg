@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Transparent outer canvas; squircle inset to ~80% safe area per Apple HIG -->
+  <rect x="100" y="100" width="824" height="824" rx="180" ry="180" fill="#0b0d10"/>
+  <!-- "ca" wordmark, centered -->
+  <g fill="#e07a5f" transform="translate(512,560)">
+    <text
+      x="0" y="0"
+      text-anchor="middle"
+      dominant-baseline="middle"
+      font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', Inter, sans-serif"
+      font-weight="700"
+      font-size="360"
+      letter-spacing="-12"
+    >ca</text>
+  </g>
+</svg>

@@ -1,0 +1,26 @@
+node_modules
+dist
+.svelte-kit
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen
+src-tauri/WixTools
+src-tauri/.cargo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode
+.idea
+
+# Local
+*.log
+*.local
+.env
+.env.local
+
+# Cache (lives outside the repo by default, but just in case)
+cache.db
