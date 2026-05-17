@@ -72,6 +72,27 @@ pub fn health_signals(
 }
 
 #[tauri::command]
+pub fn tool_usage(
+    state: State<'_, AppState>,
+    since: String,
+    until: String,
+) -> Result<Vec<analyze::ToolUsageRow>, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::tool_usage(&db, &since, &until).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn top_commands(
+    state: State<'_, AppState>,
+    since: String,
+    until: String,
+    limit: i64,
+) -> Result<Vec<analyze::CommandRow>, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::top_commands(&db, &since, &until, limit).map_err(map_err)
+}
+
+#[tauri::command]
 pub fn cache_stats(state: State<'_, AppState>) -> Result<analyze::CacheStats, String> {
     let db = state.db.lock().map_err(map_err)?;
     analyze::cache_stats(&db).map_err(map_err)
@@ -104,4 +125,29 @@ pub fn utilization(
 ) -> Result<analyze::Utilization, String> {
     let db = state.db.lock().map_err(map_err)?;
     analyze::utilization(&db, &day).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn block_usage(state: State<'_, AppState>) -> Result<analyze::BlockUsage, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::block_usage(&db).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn get_setting(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<Option<String>, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::get_setting(&db, &key).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn set_setting(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::set_setting(&db, &key, &value).map_err(map_err)
 }

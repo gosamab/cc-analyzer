@@ -1,6 +1,6 @@
 // Global UI state. Svelte 5 runes; keep this thin.
 
-type View = "dashboard" | "explorer" | "insights" | "settings";
+type View = "dashboard" | "explorer" | "insights" | "commands" | "settings";
 type Range = 1 | 7 | 30 | 90;
 
 class UIState {
@@ -92,3 +92,33 @@ class ThemeState {
 }
 
 export const theme = new ThemeState();
+
+// Privacy mode: when on, project names + paths render as stable redacted
+// placeholders. Display-time only — backend data is untouched.
+class PrivacyState {
+  enabled = $state<boolean>(false);
+
+  load() {
+    try {
+      const saved = localStorage.getItem("cc.privacy");
+      if (saved === "1") this.enabled = true;
+    } catch {
+      // ignore
+    }
+  }
+
+  set(on: boolean) {
+    this.enabled = on;
+    try {
+      localStorage.setItem("cc.privacy", on ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }
+
+  toggle() {
+    this.set(!this.enabled);
+  }
+}
+
+export const privacy = new PrivacyState();

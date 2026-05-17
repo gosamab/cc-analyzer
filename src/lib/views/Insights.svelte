@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { ipc, type Recommendation, type HealthSignal } from "../ipc";
+  import { ipc, type Recommendation, type HealthSignal, type BlockUsage } from "../ipc";
   import { ui } from "../store.svelte";
-  import { fmtUsd, fmtTok, isoRange, shortProject } from "../format";
+  import { fmtUsd, fmtTok, isoRange, shortProject, impactOfLimit, redactText } from "../format";
   import RangePicker from "../components/RangePicker.svelte";
 
   let recs = $state<Recommendation[]>([]);
   let healthy = $state<HealthSignal[]>([]);
+  let block = $state<BlockUsage | null>(null);
   let loadingRecs = $state(true);
   let loadingHealth = $state(true);
 
@@ -25,6 +26,12 @@
       .then((x) => { if (mine === reqId) healthy = x; })
       .catch(console.error)
       .finally(() => { if (mine === reqId) loadingHealth = false; });
+
+    // Block limit isn't range-scoped, but tying its fetch to the same effect keeps it
+    // fresh on view re-mount without an extra effect.
+    ipc.blockUsage()
+      .then((b) => { if (mine === reqId) block = b; })
+      .catch(console.error);
   });
 
   const sevPill = (s: string) =>
@@ -40,7 +47,7 @@
 
 <div class="p-6 space-y-6">
   <div class="flex items-center justify-between">
-    <h1 class="text-lg font-semibold">Insights</h1>
+    <h1 class="text-lg font-semibold">Recommendations</h1>
     <RangePicker />
   </div>
 
@@ -52,52 +59,47 @@
         No recommendations triggered for this range — looks healthy.
       </div>
     {:else}
-      <div class="space-y-3">
+      <div class="space-y-2">
         {#each recs as r}
-          <div class="card">
-            <div class="flex items-center gap-3">
-              <span class="pill {sevPill(r.severity)}">{r.severity}</span>
-              <div class="font-medium">{r.title}</div>
-              <div class="ml-auto text-sm num text-right">
-                {#if r.estimated_savings_tokens > 0}
-                  <div>~{fmtTok(r.estimated_savings_tokens)} tokens recoverable</div>
-                {/if}
-                {#if r.estimated_savings_usd > 0}
-                  <div class="text-muted text-xs">~{fmtUsd(r.estimated_savings_usd)} cost impact</div>
+          <div class="card !py-3 !px-4">
+            <div class="flex items-start gap-3">
+              <span class="pill {sevPill(r.severity)} shrink-0 mt-0.5">{r.severity}</span>
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-sm">{r.title}</div>
+                <div class="text-xs text-muted mt-1">{redactText(r.body)}</div>
+                <div class="text-xs text-ink mt-2 flex items-start gap-1.5">
+                  <span class="text-muted shrink-0">→</span>
+                  <span class="min-w-0">{redactText(r.action)}</span>
+                </div>
+                {#if r.action_session_id || r.action_project}
+                  <div class="mt-2 flex gap-1.5">
+                    {#if r.action_session_id}
+                      <button class="btn !py-0.5 !px-2 text-xs" onclick={() => openSession(r.action_session_id!)}>
+                        Open session
+                      </button>
+                    {/if}
+                    {#if r.action_project}
+                      <button class="btn !py-0.5 !px-2 text-xs" onclick={() => openProject(r.action_project!)}>
+                        Filter to {shortProject(r.action_project)}
+                      </button>
+                    {/if}
+                  </div>
                 {/if}
               </div>
-            </div>
-            <p class="mt-2 text-sm text-muted">{r.body}</p>
-
-            <div class="mt-3 rounded border border-border bg-panel2 p-3">
-              <div class="text-xs uppercase tracking-wide text-muted mb-1">Next action</div>
-              <div class="text-sm text-ink">{r.action}</div>
-              {#if r.action_session_id || r.action_project}
-                <div class="mt-2 flex gap-2">
-                  {#if r.action_session_id}
-                    <button
-                      class="btn text-xs px-2 py-1"
-                      onclick={() => openSession(r.action_session_id!)}
-                    >
-                      Open session →
-                    </button>
+              {#if r.estimated_savings_tokens > 0 || r.estimated_savings_usd > 0}
+                <div class="text-right text-xs num shrink-0 leading-relaxed">
+                  {#if r.estimated_savings_tokens > 0}
+                    <div class="text-ink">~{fmtTok(r.estimated_savings_tokens)} tokens</div>
+                    {#if block && impactOfLimit(r.estimated_savings_tokens, block.limit_tokens, true)}
+                      <div class="text-muted">{impactOfLimit(r.estimated_savings_tokens, block.limit_tokens, true)} of block</div>
+                    {/if}
                   {/if}
-                  {#if r.action_project}
-                    <button
-                      class="btn text-xs px-2 py-1"
-                      onclick={() => openProject(r.action_project!)}
-                    >
-                      Filter Explorer to {shortProject(r.action_project)} →
-                    </button>
+                  {#if r.estimated_savings_usd > 0}
+                    <div class="text-muted">~{fmtUsd(r.estimated_savings_usd)}</div>
                   {/if}
                 </div>
               {/if}
             </div>
-
-            <details class="mt-2">
-              <summary class="text-xs text-muted cursor-pointer">Evidence</summary>
-              <pre class="mt-1 text-xs text-muted overflow-x-auto">{JSON.stringify(r.evidence, null, 2)}</pre>
-            </details>
           </div>
         {/each}
       </div>

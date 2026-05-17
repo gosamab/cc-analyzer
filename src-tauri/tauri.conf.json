@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "cc-analyzer",
+  "productName": "Claude Code Analyzer",
   "version": "0.1.0",
   "identifier": "dev.oazab.cc-analyzer",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "cc-analyzer",
+        "title": "Claude Code Analyzer",
         "width": 1280,
         "height": 820,
         "minWidth": 960,

@@ -69,7 +69,15 @@ fn ingest_file(db: &Db, path: &Path) -> Result<usize> {
         };
         bytes_consumed += line.len() as u64 + 1; // \n
         let Ok(d): Result<Value, _> = serde_json::from_str(&line) else { continue };
-        if d.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+        let kind = d.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "ai-title" {
+            let sid = d.get("sessionId").and_then(|v| v.as_str()).unwrap_or(&session_id);
+            if let Some(title) = d.get("aiTitle").and_then(|v| v.as_str()) {
+                db.upsert_title(sid, title).ok();
+            }
+            continue;
+        }
+        if kind != "assistant" {
             continue;
         }
         let ts = d.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();

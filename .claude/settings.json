@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(pnpm exec *)",
+      "Bash(pnpm tauri *)",
+      "Bash(ps -p 95920 -o pid,command)",
+      "Bash(cargo test *)",
+      "Bash(awk -F'\"type\":\"' 'NF>1{split\\($2,a,\"\\\\\"\"\\); print a[1]}' ~/.claude/projects/-Users-oazab-cc-analyzer/*.jsonl)"
+    ]
+  }
+}

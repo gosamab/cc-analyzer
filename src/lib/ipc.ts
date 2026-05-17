@@ -54,6 +54,7 @@ export type SessionRow = {
   cost_usd: number;
   start_ts: string;
   end_ts: string;
+  title: string | null;
 };
 export type TurnTool = { name: string; count: number };
 export type TurnRow = {
@@ -70,6 +71,7 @@ export type SessionDetail = {
   session_id: string;
   project: string;
   model: string;
+  title: string | null;
   msgs: number;
   cost_usd: number;
   input_tok: number;
@@ -120,6 +122,29 @@ export type Utilization = {
   hourly: HourBucket[];
 };
 
+export type CommandVariant = { cmd: string; count: number };
+export type CommandCategory =
+  | "git" | "install" | "run"
+  | "search" | "fs" | "inspect" | "script" | "text" | "net"
+  | "other";
+export type CommandRow = {
+  cmd: string;
+  group_key: string;
+  category: CommandCategory;
+  count: number;
+  tokens: number;
+  cost_usd: number;
+  variants: CommandVariant[];
+};
+
+export type ToolUsageRow = {
+  tool: string;
+  count: number;
+  tokens: number;
+  cost_usd: number;
+  turns: number;
+};
+
 export type CacheStats = {
   messages: number;
   sessions: number;
@@ -134,6 +159,27 @@ export type PricingRow = {
   output: number;
   cache_write: number;
   cache_read: number;
+};
+export type BlockUsage = {
+  active: boolean;
+  block_start: string;
+  block_end: string;
+  now: string;
+  seconds_remaining: number;
+  tokens: number;
+  input_tok: number;
+  output_tok: number;
+  cache_w_tok: number;
+  cache_r_tok: number;
+  cost_usd: number;
+  msgs: number;
+  limit_tokens: number;
+  limit_source: "manual" | "auto" | "none";
+  auto_limit_tokens: number;
+  historical_p50: number;
+  historical_p90: number;
+  historical_max: number;
+  historical_blocks: number;
 };
 
 export const ipc = {
@@ -150,9 +196,17 @@ export const ipc = {
     invoke<Recommendation[]>("recommendations", { since, until }),
   healthSignals: (since: string, until: string) =>
     invoke<HealthSignal[]>("health_signals", { since, until }),
+  topCommands: (since: string, until: string, limit = 20) =>
+    invoke<CommandRow[]>("top_commands", { since, until, limit }),
+  toolUsage: (since: string, until: string) =>
+    invoke<ToolUsageRow[]>("tool_usage", { since, until }),
   utilization: (day: string) => invoke<Utilization>("utilization", { day }),
   cacheStats: () => invoke<CacheStats>("cache_stats"),
   clearCache: () => invoke<void>("clear_cache"),
   pricingTable: () => invoke<PricingRow[]>("pricing_table"),
   setPricing: (rows: PricingRow[]) => invoke<number>("set_pricing", { rows }),
+  blockUsage: () => invoke<BlockUsage>("block_usage"),
+  getSetting: (key: string) => invoke<string | null>("get_setting", { key }),
+  setSetting: (key: string, value: string) =>
+    invoke<void>("set_setting", { key, value }),
 };

@@ -29,11 +29,16 @@ pub fn run() {
             commands::session_detail,
             commands::recommendations,
             commands::health_signals,
+            commands::top_commands,
+            commands::tool_usage,
             commands::utilization,
             commands::cache_stats,
             commands::clear_cache,
             commands::pricing_table,
             commands::set_pricing,
+            commands::block_usage,
+            commands::get_setting,
+            commands::set_setting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running cc-analyzer");

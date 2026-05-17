@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -242,19 +243,23 @@ pub struct SessionRow {
     pub cost_usd: f64,
     pub start_ts: String,
     pub end_ts: String,
+    pub title: Option<String>,
 }
 
 pub fn sessions(db: &Db, since: Option<&str>, until: Option<&str>) -> Result<Vec<SessionRow>> {
     let (where_sql, args) = build_where(since, until, None);
     let q = format!(
-        "SELECT session_id, project, MAX(model), COUNT(*),
-                SUM(input_tok), SUM(output_tok), SUM(cache_w_tok), SUM(cache_r_tok),
-                SUM(cost_usd), MIN(ts), MAX(ts)
-         FROM messages {where_sql}
-         GROUP BY session_id, project
-         ORDER BY SUM(input_tok+output_tok+cache_w_tok+cache_r_tok) DESC
+        "SELECT m.session_id, m.project, MAX(m.model), COUNT(*),
+                SUM(m.input_tok), SUM(m.output_tok), SUM(m.cache_w_tok), SUM(m.cache_r_tok),
+                SUM(m.cost_usd), MIN(m.ts), MAX(m.ts), t.title
+         FROM messages m
+         LEFT JOIN session_titles t ON t.session_id = m.session_id
+         {where_sql}
+         GROUP BY m.session_id, m.project
+         ORDER BY SUM(m.input_tok+m.output_tok+m.cache_w_tok+m.cache_r_tok) DESC
          LIMIT 500"
     );
+    // build_where uses unqualified column names — they still match the m alias.
     let mut stmt = db.conn.prepare(&q)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
         let inp: i64 = r.get(4)?;
@@ -274,6 +279,7 @@ pub fn sessions(db: &Db, since: Option<&str>, until: Option<&str>) -> Result<Vec
             cost_usd: r.get(8)?,
             start_ts: r.get(9)?,
             end_ts: r.get(10)?,
+            title: r.get(11)?,
         })
     })?;
     let mut out = Vec::new();
@@ -591,7 +597,19 @@ pub fn recommendations(db: &Db, since: &str, until: &str) -> Result<Vec<Recommen
         });
     }
 
-    // Rule 5 — Bash overuse (sessions where Bash dominates the tool mix, often
+    // Rule 5 — Hand-typeable commands (git/install/run-scripts that you could
+    // just run yourself instead of paying a turn of context replay).
+    if let Some(rec) = hand_typeable_recommendation(db, since, until)? {
+        recs.push(rec);
+    }
+
+    // Rule 5b — Repeated env-var prefixes (`DOTNET_ROOT=… dotnet …`) that
+    // should live in shell init so Claude doesn't restate them every turn.
+    if let Some(rec) = env_prefix_recommendation(db, since, until)? {
+        recs.push(rec);
+    }
+
+    // Rule 6 — Bash overuse (sessions where Bash dominates the tool mix, often
     // git-status-spam or shell-noodling)
     for row in bash_overuse_candidates(db, since, until)?.into_iter().take(3) {
         let short_id = &row.session_id[..8];
@@ -639,6 +657,717 @@ pub fn recommendations(db: &Db, since: &str, until: &str) -> Result<Vec<Recommen
     Ok(recs)
 }
 
+#[derive(Serialize)]
+pub struct CommandRow {
+    pub cmd: String,       // most-common raw variant in this group
+    pub group_key: String, // the collapsed leading-tokens key used to group
+    pub category: String,  // "git" | "install" | "run" | "other"
+    pub count: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    pub variants: Vec<CommandVariant>,
+}
+
+#[derive(Serialize)]
+pub struct CommandVariant {
+    pub cmd: String,
+    pub count: i64,
+}
+
+#[derive(Serialize)]
+pub struct ToolUsageRow {
+    pub tool: String,
+    pub count: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    pub turns: i64, // distinct turns that used this tool
+}
+
+/// Aggregate tool usage across the range (per tool name). Each tool call inside
+/// a turn is charged (turn_tokens / tools_in_turn) so multi-tool turns don't
+/// double-count.
+pub fn tool_usage(db: &Db, since: &str, until: &str) -> Result<Vec<ToolUsageRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd, tools_json
+         FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    let mut agg: HashMap<String, (i64, f64, i64, i64)> = HashMap::new();
+    while let Some(r) = rows.next()? {
+        let inp: i64 = r.get(0)?;
+        let out: i64 = r.get(1)?;
+        let cw: i64 = r.get(2)?;
+        let cr: i64 = r.get(3)?;
+        let cost: f64 = r.get(4)?;
+        let json: String = r.get(5)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        if tools.is_empty() { continue; }
+        let n_tools = tools.len() as f64;
+        let turn_tokens = (inp + out + cw + cr) as f64;
+        let per_call_tokens = (turn_tokens / n_tools) as i64;
+        let per_call_cost = cost / n_tools;
+        let mut turn_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for t in tools {
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+            let entry = agg.entry(name.clone()).or_insert((0, 0.0, 0, 0));
+            entry.0 += 1;
+            entry.1 += per_call_cost;
+            entry.2 += per_call_tokens;
+            turn_tools.insert(name);
+        }
+        for name in turn_tools {
+            agg.entry(name).or_insert((0, 0.0, 0, 0)).3 += 1;
+        }
+    }
+    let mut out: Vec<ToolUsageRow> = agg
+        .into_iter()
+        .map(|(tool, (count, cost, tokens, turns))| ToolUsageRow {
+            tool,
+            count,
+            tokens,
+            cost_usd: cost,
+            turns,
+        })
+        .collect();
+    out.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    Ok(out)
+}
+
+/// Top Bash commands in the range with attributed token + cost cost.
+/// Each tool call inside a turn is charged (turn_tokens / tools_in_turn) — so
+/// a multi-tool turn splits its replay cost across its calls. Commands are
+/// grouped by their leading-tokens key; each row carries the raw variants
+/// that fell into the group so the UI can expand to show them.
+pub fn top_commands(db: &Db, since: &str, until: &str, limit: i64) -> Result<Vec<CommandRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd, tools_json
+         FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    struct Agg {
+        tokens: i64,
+        cost: f64,
+        count: i64,
+        category: &'static str,
+        variants: HashMap<String, i64>,
+    }
+    let mut agg: HashMap<String, Agg> = HashMap::new();
+    while let Some(r) = rows.next()? {
+        let inp: i64 = r.get(0)?;
+        let out: i64 = r.get(1)?;
+        let cw: i64 = r.get(2)?;
+        let cr: i64 = r.get(3)?;
+        let cost: f64 = r.get(4)?;
+        let json: String = r.get(5)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        if tools.is_empty() { continue; }
+        let n_tools = tools.len() as f64;
+        let turn_tokens = (inp + out + cw + cr) as f64;
+        let per_call_tokens = (turn_tokens / n_tools) as i64;
+        let per_call_cost = cost / n_tools;
+        for t in tools {
+            if t.get("name").and_then(|v| v.as_str()) != Some("Bash") { continue; }
+            let Some(cmd) = t.get("cmd").and_then(|v| v.as_str()) else { continue };
+            let normalized = normalize_cmd(cmd);
+            let cat = command_category(&normalized);
+            let key = cmd_display_key(&normalized);
+            let entry = agg.entry(key).or_insert_with(|| Agg {
+                tokens: 0,
+                cost: 0.0,
+                count: 0,
+                category: cat,
+                variants: HashMap::new(),
+            });
+            entry.tokens += per_call_tokens;
+            entry.cost += per_call_cost;
+            entry.count += 1;
+            // Truncate the raw variant for storage — most commands fit in <120 chars
+            // and full text is already in tools_json if anyone needs it.
+            let raw: String = cmd.chars().take(200).collect();
+            *entry.variants.entry(raw).or_default() += 1;
+        }
+    }
+    let mut out: Vec<CommandRow> = agg
+        .into_iter()
+        .map(|(group_key, a)| {
+            let mut variants: Vec<CommandVariant> = a
+                .variants
+                .into_iter()
+                .map(|(cmd, count)| CommandVariant { cmd, count })
+                .collect();
+            // Sort by count desc; tie-break by shorter cmd so when many heredoc
+            // variants tie at count=1 we pick the cleanest one as the label.
+            variants.sort_by(|x, y| {
+                y.count.cmp(&x.count).then_with(|| x.cmd.len().cmp(&y.cmd.len()))
+            });
+            let top_cmd = variants
+                .first()
+                .map(|v| oneline(&v.cmd))
+                .unwrap_or_else(|| group_key.clone());
+            // Cap variant list so the IPC payload stays small for cd/grep-style sprawl.
+            variants.truncate(20);
+            CommandRow {
+                cmd: top_cmd,
+                group_key,
+                category: a.category.to_string(),
+                count: a.count,
+                tokens: a.tokens,
+                cost_usd: a.cost,
+                variants,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    out.truncate(limit.max(1) as usize);
+    Ok(out)
+}
+
+/// Broader categorization used by the Commands table — gives every row a
+/// meaningful bucket. The "hand-typeable" set (git/install/run) overlaps
+/// with this; new buckets (search/fs/inspect/script/text/net) are purely
+/// for display, not flagged by the recommendation.
+fn command_category(cmd: &str) -> &'static str {
+    if let Some(c) = hand_typeable_category(cmd) {
+        return c;
+    }
+    let head = cmd.split_whitespace().next().unwrap_or("");
+    // Strip a `./` or absolute-path prefix to compare basename.
+    let basename = head.rsplit('/').next().unwrap_or(head);
+    match basename {
+        // Search/find
+        "grep" | "rg" | "ag" | "ack" | "find" | "fd" | "locate" => "search",
+        // Filesystem nav/mutation
+        "cd" | "pushd" | "popd" | "ls" | "ll" | "la" | "mkdir" | "rmdir" | "cp" | "mv"
+        | "rm" | "ln" | "touch" | "chmod" | "chown" | "stat" | "readlink" | "realpath"
+        | "pwd" => "fs",
+        // Reading file content
+        "cat" | "bat" | "head" | "tail" | "less" | "more" | "wc" | "file" | "du" | "df"
+        | "tree" | "tac" | "nl" | "hexdump" | "xxd" => "inspect",
+        // Interpreters / script runners
+        "python" | "python3" | "py" | "node" | "deno" | "bun" | "ruby" | "perl"
+        | "bash" | "sh" | "zsh" | "fish" | "tsx" | "ts-node" | "ipython" => "script",
+        // Text-processing pipelines
+        "sed" | "awk" | "tr" | "sort" | "uniq" | "cut" | "paste" | "jq" | "yq"
+        | "fzf" | "xargs" | "tee" | "column" => "text",
+        // Network / remote
+        "curl" | "wget" | "ssh" | "scp" | "rsync" | "ping" | "dig" | "nslookup"
+        | "nc" | "telnet" | "host" | "traceroute" => "net",
+        _ => "other",
+    }
+}
+
+/// Categorize a Bash command into one of the "hand-typeable" buckets, or None
+/// if the command is something Claude probably should be running (file ops,
+/// piped state-extraction, etc.).
+fn hand_typeable_category(cmd: &str) -> Option<&'static str> {
+    let c = cmd.trim_start();
+    let head: String = c.chars().take(40).collect();
+    let h = head.as_str();
+    // Strip a leading subshell or env-prefix if present; cheap heuristic.
+    if h.starts_with("git ") || h == "git" {
+        return Some("git");
+    }
+    if h.starts_with("npm install") || h.starts_with("npm i ") || h == "npm i"
+        || h.starts_with("pnpm install") || h.starts_with("pnpm add ")
+        || h.starts_with("pnpm i ") || h == "pnpm i"
+        || h.starts_with("yarn install") || h.starts_with("yarn add ") || h == "yarn"
+        || h.starts_with("bun install") || h.starts_with("bun add ") || h.starts_with("bun i ")
+        || h.starts_with("cargo install ") || h.starts_with("cargo add ")
+    {
+        return Some("install");
+    }
+    if h.starts_with("npm run") || h.starts_with("npm test") || h.starts_with("npm start")
+        || h.starts_with("pnpm run") || h.starts_with("pnpm dev") || h.starts_with("pnpm build")
+        || h.starts_with("pnpm test") || h.starts_with("pnpm start")
+        || h.starts_with("pnpm exec ") || h.starts_with("pnpm --filter ")
+        || h.starts_with("yarn run") || h.starts_with("yarn dev") || h.starts_with("yarn build")
+        || h.starts_with("yarn test") || h.starts_with("yarn start")
+        || h.starts_with("bun run") || h.starts_with("bun dev") || h.starts_with("bun test")
+        || h.starts_with("cargo run") || h.starts_with("cargo build")
+        || h.starts_with("cargo test") || h.starts_with("cargo check")
+        || h.starts_with("npx ") || h == "npx"
+        || h.starts_with("dotnet ") || h == "dotnet"
+        || h.starts_with("flutter ") || h == "flutter"
+        || h.starts_with("uvicorn ") || h == "uvicorn"
+        || h.starts_with("gunicorn ") || h == "gunicorn"
+        || h.starts_with("rails ") || h == "rails"
+        || h.starts_with("mix ") || h == "mix"
+        || h.starts_with("gradle ") || h == "gradle"
+        || h.starts_with("mvn ") || h == "mvn"
+        || h.starts_with("./gradlew") || h.starts_with("./mvnw")
+        || h.starts_with("make ") || h == "make"
+    {
+        return Some("run");
+    }
+    None
+}
+
+/// Normalize a raw Bash command down to the "real" command being run, so
+/// stats group like-with-like:
+///   - `cd /tmp/foo && pnpm dev`            → `pnpm dev`
+///   - `DOTNET_ROOT=/opt/... dotnet build`  → `dotnet build`
+///   - `pnpm exec svelte-check 2>&1 | tail` → `pnpm exec svelte-check`
+///   - `cd /tmp/foo`                        → `cd /tmp/foo` (only segment)
+/// Quote/subshell handling is intentionally naive — for stats use the
+/// occasional `echo "a && b"` misclassification doesn't matter.
+fn normalize_cmd(raw: &str) -> String {
+    // First split on `;`, then on `&&` / `||` within each segment.
+    let segments: Vec<String> = raw
+        .split(';')
+        .flat_map(split_logical)
+        .map(|s| trim_pipe_redirect(s.trim()).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Walk segments; prefer the last non-trivial one. Fall back to the
+    // first trivial segment so single-`cd` calls still get classified.
+    let mut chosen: Option<String> = None;
+    for seg in &segments {
+        let stripped = strip_env_prefix(seg).trim().to_string();
+        if stripped.is_empty() { continue; }
+        if is_trivial(&stripped) {
+            if chosen.is_none() {
+                chosen = Some(stripped);
+            }
+        } else {
+            chosen = Some(stripped);
+        }
+    }
+    chosen.unwrap_or_else(|| raw.trim().to_string())
+}
+
+fn split_logical(s: &str) -> Vec<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        let pair = &bytes[i..i + 2];
+        if pair == b"&&" || pair == b"||" {
+            out.push(s[start..i].to_string());
+            i += 2;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push(s[start..].to_string());
+    out
+}
+
+fn trim_pipe_redirect(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        // Skip `||` — that's a logical OR (split_logical handles it, but be safe).
+        if c == b'|' && i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+            i += 2;
+            continue;
+        }
+        // `<<` (heredoc) is part of the invocation, not a redirect — keep `<<`
+        // so `python3 << 'EOF'\n…` collapses to `python3 <<` rather than `python3`.
+        if c == b'<' && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+            return &s[..i + 2];
+        }
+        // `&>` (bash redirect-all) — treat as redirect, cut here.
+        if c == b'|' || c == b'<' || c == b'>' {
+            return &s[..i];
+        }
+        i += 1;
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_cd_prefix() {
+        assert_eq!(normalize_cmd("cd /tmp/foo && pnpm dev"), "pnpm dev");
+        assert_eq!(
+            normalize_cmd("cd \"/Users/oazab/Library/Mobile Documents/com~apple~CloudDocs/Private/Accounting\" && python3 -c \"import sys\""),
+            "python3 -c \"import sys\""
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_heredoc_marker() {
+        let raw = "cd \"/tmp\" && python3 << 'EOF'\nimport sys\nfor i in range(10):\n    print(i)\nEOF";
+        let n = normalize_cmd(raw);
+        assert!(n.starts_with("python3 <<"), "got: {n}");
+        // python3 isn't in the keep_subcommand list — collapses to bare `python3`.
+        assert_eq!(cmd_display_key(&n), "python3");
+    }
+
+    #[test]
+    fn normalize_strips_env_prefix() {
+        assert_eq!(
+            normalize_cmd("DOTNET_ROOT=/opt/homebrew/opt/dotnet@8/libexec dotnet build"),
+            "dotnet build"
+        );
+        assert_eq!(
+            normalize_cmd("FOO=bar BAZ=qux cargo run -p client"),
+            "cargo run -p client"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_pipe_tail() {
+        assert_eq!(
+            normalize_cmd("pnpm exec svelte-check --output human 2>&1 | tail -10"),
+            "pnpm exec svelte-check --output human 2"
+        );
+        // Display key for a runner: program + first non-flag/non-pkg arg.
+        assert_eq!(
+            cmd_display_key(&normalize_cmd("pnpm exec svelte-check --output human 2>&1 | tail -10")),
+            "pnpm exec"
+        );
+    }
+
+    #[test]
+    fn display_key_collapses_plain_programs() {
+        assert_eq!(cmd_display_key("python3 -c \"import sys\""), "python3");
+        assert_eq!(cmd_display_key("python3 script.py --foo"), "python3");
+        assert_eq!(cmd_display_key("cd /tmp/foo"), "cd");
+        assert_eq!(cmd_display_key("grep -rn pattern src/"), "grep");
+        assert_eq!(cmd_display_key("ls -la"), "ls");
+    }
+
+    #[test]
+    fn display_key_keeps_subcommand_for_runners() {
+        assert_eq!(cmd_display_key("git status -sb"), "git status");
+        assert_eq!(cmd_display_key("git status --short"), "git status");
+        assert_eq!(cmd_display_key("git log --oneline -5"), "git log");
+        assert_eq!(cmd_display_key("pnpm dev"), "pnpm dev");
+        assert_eq!(cmd_display_key("pnpm run dev"), "pnpm run");
+        assert_eq!(cmd_display_key("pnpm --filter @masar/web build"), "pnpm build");
+        assert_eq!(cmd_display_key("cargo run -p client"), "cargo run");
+        assert_eq!(cmd_display_key("docker ps -a"), "docker ps");
+    }
+
+    #[test]
+    fn normalize_handles_lone_cd() {
+        // No non-trivial segment — keep the cd so it doesn't disappear entirely.
+        assert_eq!(normalize_cmd("cd /tmp/foo"), "cd /tmp/foo");
+    }
+
+    #[test]
+    fn normalize_handles_chained_trivial() {
+        // cd → cd → npm test : pick the npm test as the real command.
+        assert_eq!(
+            normalize_cmd("cd foo && cd bar && npm test"),
+            "npm test"
+        );
+    }
+}
+
+fn strip_env_prefix(s: &str) -> &str {
+    let mut rest = s.trim_start();
+    loop {
+        let Some(space) = rest.find(char::is_whitespace) else { break };
+        let tok = &rest[..space];
+        if is_env_assignment(tok) {
+            rest = rest[space..].trim_start();
+        } else {
+            break;
+        }
+    }
+    rest
+}
+
+fn is_env_assignment(tok: &str) -> bool {
+    let Some(eq) = tok.find('=') else { return false };
+    if eq == 0 { return false; }
+    let name = &tok[..eq];
+    let mut chars = name.chars();
+    let first = match chars.next() { Some(c) => c, None => return false };
+    if !(first.is_ascii_uppercase() || first == '_') { return false; }
+    chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Collapse runs of whitespace (incl. newlines) to single spaces and trim.
+/// Used for row labels so heredoc bodies don't bleed into the display.
+fn oneline(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Walk leading `ENV=VAL` tokens, returning each assignment verbatim.
+fn extract_env_assignments(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = cmd.trim_start();
+    loop {
+        let Some(space) = rest.find(char::is_whitespace) else { break };
+        let tok = &rest[..space];
+        if is_env_assignment(tok) {
+            out.push(tok.to_string());
+            rest = rest[space..].trim_start();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn is_trivial(seg: &str) -> bool {
+    let first = seg.split_whitespace().next().unwrap_or("");
+    matches!(
+        first,
+        "cd" | "export" | "mkdir" | "source" | "." | "unset" | "set" | "true" | "false" | "pushd" | "popd"
+    )
+}
+
+/// Collapse a command to a stable display key. For most programs the program
+/// name alone is the group key (`python3`, `cd`, `grep`, `ls`). For "verb-noun"
+/// CLIs (git, package managers, cloud SDKs) we keep the first non-flag arg as
+/// the subcommand (`git status`, `pnpm dev`, `cargo run`, `docker ps`).
+/// Flags and package selectors (`--filter @foo`, `-p client`) are skipped so
+/// `pnpm --filter @foo build` collapses with `pnpm build`.
+fn cmd_display_key(cmd: &str) -> String {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    if toks.is_empty() {
+        return String::new();
+    }
+    let first = toks[0];
+
+    let keep_subcommand = matches!(
+        first,
+        "git" | "npm" | "pnpm" | "yarn" | "bun" | "npx"
+            | "cargo" | "go" | "deno" | "rustup"
+            | "dotnet" | "flutter" | "rails" | "mix" | "gradle" | "mvn"
+            | "docker" | "podman" | "kubectl" | "helm" | "terraform"
+            | "gcloud" | "aws" | "az" | "vercel" | "flyctl" | "heroku"
+            | "brew" | "apt" | "apt-get" | "dnf" | "yum" | "pacman"
+            | "make" | "just" | "task" | "rake"
+            | "systemctl" | "service" | "launchctl"
+            | "rbenv" | "pyenv" | "asdf" | "nvm" | "fnm"
+            | "pip" | "pip3" | "poetry" | "uv" | "pipx"
+    );
+
+    if !keep_subcommand || toks.len() < 2 {
+        return first.to_string();
+    }
+
+    // Find first arg-like token after the program: skip flags (-x, --foo) and
+    // package selectors (@scope/name, paths starting with `/` or `.`).
+    let sub = toks.iter().skip(1).find(|t| {
+        !t.starts_with('-') && !t.starts_with('@')
+    });
+    match sub {
+        Some(s) => format!("{} {}", first, s),
+        None => first.to_string(),
+    }
+}
+
+fn hand_typeable_recommendation(db: &Db, since: &str, until: &str) -> Result<Option<Recommendation>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd, tools_json
+         FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    let mut by_cat: HashMap<&'static str, i64> = HashMap::new();
+    let mut by_cmd: HashMap<String, (i64, &'static str)> = HashMap::new();
+    let mut total = 0i64;
+    let mut attributed_tokens: i64 = 0;
+    let mut attributed_cost: f64 = 0.0;
+    while let Some(r) = rows.next()? {
+        let inp: i64 = r.get(0)?;
+        let out: i64 = r.get(1)?;
+        let cw: i64 = r.get(2)?;
+        let cr: i64 = r.get(3)?;
+        let cost: f64 = r.get(4)?;
+        let json: String = r.get(5)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        if tools.is_empty() { continue; }
+        let n_tools = tools.len() as f64;
+        let per_call_tokens = ((inp + out + cw + cr) as f64 / n_tools) as i64;
+        let per_call_cost = cost / n_tools;
+        for t in tools {
+            if t.get("name").and_then(|v| v.as_str()) != Some("Bash") {
+                continue;
+            }
+            let Some(cmd) = t.get("cmd").and_then(|v| v.as_str()) else { continue };
+            let normalized = normalize_cmd(cmd);
+            let Some(cat) = hand_typeable_category(&normalized) else { continue };
+            total += 1;
+            attributed_tokens += per_call_tokens;
+            attributed_cost += per_call_cost;
+            *by_cat.entry(cat).or_default() += 1;
+            let key = cmd_display_key(&normalized);
+            by_cmd.entry(key).or_insert((0, cat)).0 += 1;
+        }
+    }
+
+    if total < 30 {
+        return Ok(None);
+    }
+
+    let mut top: Vec<(String, i64, &'static str)> = by_cmd
+        .into_iter()
+        .map(|(k, (n, c))| (k, n, c))
+        .collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.truncate(5);
+
+    let cat_order = ["git", "run", "install"];
+    let cat_str = cat_order
+        .iter()
+        .filter_map(|c| by_cat.get(c).map(|n| format!("{} {}", n, c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let action = format!(
+        "Top: {}. Run these in your terminal — each call here replays your full session context.",
+        top.iter()
+            .map(|(cmd, n, _)| format!("`{}` ({}×)", cmd, n))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+
+    let severity = if total >= 200 { "HIGH" } else { "MED" };
+    // ~half of these are the kind Claude doesn't actually need the output for —
+    // the rest you'd paste back. Conservative 50% recoverable.
+    let savings_tokens = (attributed_tokens as f64 * 0.5) as i64;
+    let savings_usd = attributed_cost * 0.5;
+
+    Ok(Some(Recommendation {
+        key: "hand-typeable-commands".into(),
+        severity: severity.into(),
+        title: "Commands you could run by hand".into(),
+        body: format!(
+            "Claude ran {} git/install/run-script commands ({}). Each one costs a full assistant turn — running them in your own terminal skips the context replay.",
+            total, cat_str,
+        ),
+        action,
+        action_session_id: None,
+        action_project: None,
+        evidence: serde_json::json!({
+            "total": total,
+            "by_category": by_cat,
+            "attributed_tokens": attributed_tokens,
+            "attributed_cost_usd": attributed_cost,
+            "top_commands": top
+                .iter()
+                .map(|(cmd, n, cat)| serde_json::json!({"cmd": cmd, "count": n, "category": cat}))
+                .collect::<Vec<_>>(),
+        }),
+        estimated_savings_tokens: savings_tokens,
+        estimated_savings_usd: savings_usd,
+    }))
+}
+
+/// Detect env-var prefixes that show up across many Bash calls
+/// (e.g. `DOTNET_ROOT=/opt/homebrew/opt/dotnet@8/libexec dotnet …`).
+/// These belong in shell init so Claude isn't restating them every turn.
+fn env_prefix_recommendation(db: &Db, since: &str, until: &str) -> Result<Option<Recommendation>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd, tools_json
+         FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    // Per env-var NAME: total count + an example assignment (the most common value).
+    let mut by_var: HashMap<String, (i64, HashMap<String, i64>)> = HashMap::new();
+    let mut total_with_env: i64 = 0;
+    let mut attributed_tokens: i64 = 0;
+    let mut attributed_cost: f64 = 0.0;
+    while let Some(r) = rows.next()? {
+        let inp: i64 = r.get(0)?;
+        let out: i64 = r.get(1)?;
+        let cw: i64 = r.get(2)?;
+        let cr: i64 = r.get(3)?;
+        let cost: f64 = r.get(4)?;
+        let json: String = r.get(5)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        if tools.is_empty() { continue; }
+        let n_tools = tools.len() as f64;
+        let per_call_tokens = ((inp + out + cw + cr) as f64 / n_tools) as i64;
+        let per_call_cost = cost / n_tools;
+        for t in tools {
+            if t.get("name").and_then(|v| v.as_str()) != Some("Bash") { continue; }
+            let Some(cmd) = t.get("cmd").and_then(|v| v.as_str()) else { continue };
+            let assignments = extract_env_assignments(cmd);
+            if assignments.is_empty() { continue; }
+            total_with_env += 1;
+            attributed_tokens += per_call_tokens;
+            attributed_cost += per_call_cost;
+            for a in assignments {
+                let Some(eq) = a.find('=') else { continue };
+                let name = a[..eq].to_string();
+                let entry = by_var.entry(name).or_insert((0, HashMap::new()));
+                entry.0 += 1;
+                *entry.1.entry(a.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    // Keep vars that appear >= 10 times — anything less is noise.
+    let mut hits: Vec<(String, i64, String)> = by_var
+        .into_iter()
+        .filter(|(_, (n, _))| *n >= 10)
+        .map(|(name, (n, vals))| {
+            let example = vals
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(v, _)| v)
+                .unwrap_or_else(|| name.clone());
+            (name, n, example)
+        })
+        .collect();
+    if hits.is_empty() {
+        return Ok(None);
+    }
+    hits.sort_by(|a, b| b.1.cmp(&a.1));
+    hits.truncate(8);
+
+    let top_n: i64 = hits.iter().map(|(_, n, _)| *n).sum();
+    let severity = if top_n >= 100 { "MED" } else { "LOW" };
+    let examples = hits
+        .iter()
+        .take(3)
+        .map(|(_, n, ex)| format!("`{}` ({}×)", ex, n))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let export_lines = hits
+        .iter()
+        .map(|(_, _, ex)| format!("export {}", ex))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Ok(Some(Recommendation {
+        key: "env-prefix-spam".into(),
+        severity: severity.into(),
+        title: "Repeated env-var prefixes on Bash calls".into(),
+        body: format!(
+            "Claude prefixed {} Bash calls with env-var assignments (top: {}). Each turn restates the prefix and pays for it in context.",
+            total_with_env, examples,
+        ),
+        action: format!(
+            "Add to your shell init (~/.zshrc or ~/.bashrc) so Claude can drop the prefix: {}",
+            export_lines,
+        ),
+        action_session_id: None,
+        action_project: None,
+        evidence: serde_json::json!({
+            "total_calls_with_env_prefix": total_with_env,
+            "attributed_tokens": attributed_tokens,
+            "attributed_cost_usd": attributed_cost,
+            "vars": hits
+                .iter()
+                .map(|(name, n, ex)| serde_json::json!({"name": name, "count": n, "example": ex}))
+                .collect::<Vec<_>>(),
+        }),
+        // Removing the prefix doesn't itself save the full turn — but the
+        // whole calling pattern is suspect. Show 10% as a conservative nudge.
+        estimated_savings_tokens: (attributed_tokens as f64 * 0.10) as i64,
+        estimated_savings_usd: attributed_cost * 0.10,
+    }))
+}
+
 struct BashRow {
     session_id: String,
     project: String,
@@ -681,11 +1410,8 @@ fn bash_overuse_candidates(db: &Db, since: &str, until: &str) -> Result<Vec<Bash
                 agg.bash += 1;
                 if let Some(cmd) = t.get("cmd").and_then(|v| v.as_str()) {
                     // Group by the leading verb so `git status -sb` and `git status` collapse.
-                    let key: String = cmd
-                        .split_whitespace()
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let normalized = normalize_cmd(cmd);
+                    let key = cmd_display_key(&normalized);
                     if !key.is_empty() {
                         *agg.cmds.entry(key).or_default() += 1;
                     }
@@ -855,6 +1581,94 @@ pub fn health_signals(db: &Db, since: &str, until: &str) -> Result<Vec<HealthSig
         }
     }
 
+    // Walk tool calls once to derive: bash share, hand-typeable count, env-prefix usage.
+    let mut tool_total = 0i64;
+    let mut bash_total = 0i64;
+    let mut hand_typeable_count = 0i64;
+    let mut env_call_count = 0i64;
+    let mut env_var_counts: HashMap<String, i64> = HashMap::new();
+    let mut stmt = db.conn.prepare(
+        "SELECT tools_json FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    while let Some(r) = rows.next()? {
+        let json: String = r.get(0)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        for t in tools {
+            tool_total += 1;
+            if t.get("name").and_then(|v| v.as_str()) != Some("Bash") { continue; }
+            bash_total += 1;
+            let Some(cmd) = t.get("cmd").and_then(|v| v.as_str()) else { continue };
+            let assignments = extract_env_assignments(cmd);
+            if !assignments.is_empty() {
+                env_call_count += 1;
+                for a in assignments {
+                    if let Some(eq) = a.find('=') {
+                        *env_var_counts.entry(a[..eq].to_string()).or_default() += 1;
+                    }
+                }
+            }
+            let normalized = normalize_cmd(cmd);
+            if hand_typeable_category(&normalized).is_some() {
+                hand_typeable_count += 1;
+            }
+        }
+    }
+
+    if tool_total >= 50 {
+        let bash_share = bash_total as f64 / tool_total as f64;
+        if bash_share < 0.40 {
+            out.push(HealthSignal {
+                key: "bash-not-dominant".into(),
+                title: "Tool mix is edit-heavy".into(),
+                detail: format!(
+                    "Bash is only {:.0}% of tool calls — most work is reads/edits, not shell.",
+                    bash_share * 100.0
+                ),
+            });
+        }
+        if hand_typeable_count < 30 {
+            out.push(HealthSignal {
+                key: "hand-typeable-low".into(),
+                title: "Few hand-typeable commands".into(),
+                detail: format!(
+                    "Only {} git/install/run-script commands ran — Claude isn't burning turns on trivia.",
+                    hand_typeable_count
+                ),
+            });
+        }
+    }
+    let max_var = env_var_counts.values().copied().max().unwrap_or(0);
+    if bash_total >= 50 && max_var < 10 {
+        out.push(HealthSignal {
+            key: "no-env-spam".into(),
+            title: "No env-var prefix spam".into(),
+            detail: if env_call_count == 0 {
+                "No Bash calls carry env-var prefixes.".into()
+            } else {
+                format!("Env prefixes used sparingly ({} Bash calls, no var repeated ≥10×).", env_call_count)
+            },
+        });
+    }
+
+    if s.by_project.len() >= 3 {
+        out.push(HealthSignal {
+            key: "project-diversity".into(),
+            title: "Multi-project activity".into(),
+            detail: format!("{} projects with activity in this range.", s.by_project.len()),
+        });
+    }
+
+    let bloated = context_bloat_candidates(db, since, until)?;
+    if bloated.is_empty() && sess.len() >= 5 {
+        out.push(HealthSignal {
+            key: "no-context-bloat".into(),
+            title: "No context bloat".into(),
+            detail: "No session shows runaway per-turn token growth.".into(),
+        });
+    }
+
     Ok(out)
 }
 
@@ -863,6 +1677,7 @@ pub struct SessionDetail {
     pub session_id: String,
     pub project: String,
     pub model: String,
+    pub title: Option<String>,
     pub msgs: i64,
     pub cost_usd: f64,
     pub input_tok: i64,
@@ -1045,10 +1860,19 @@ pub fn session_detail(db: &Db, session_id: &str) -> Result<SessionDetail> {
     top_files.sort_by(|a, b| b.count.cmp(&a.count));
     top_files.truncate(20);
 
+    let title: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT title FROM session_titles WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .ok();
     Ok(SessionDetail {
         session_id: session_id.to_string(),
         project,
         model,
+        title,
         msgs,
         cost_usd: cost,
         input_tok: tot_inp,
@@ -1059,4 +1883,189 @@ pub fn session_detail(db: &Db, session_id: &str) -> Result<SessionDetail> {
         top_files,
         tool_counts,
     })
+}
+
+#[derive(Serialize)]
+pub struct BlockUsage {
+    pub active: bool,
+    pub block_start: String,
+    pub block_end: String,
+    pub now: String,
+    pub seconds_remaining: i64,
+    pub tokens: i64,
+    pub input_tok: i64,
+    pub output_tok: i64,
+    pub cache_w_tok: i64,
+    pub cache_r_tok: i64,
+    pub cost_usd: f64,
+    pub msgs: i64,
+    pub limit_tokens: i64,
+    pub limit_source: String, // "manual" | "auto" | "none"
+    pub auto_limit_tokens: i64,
+    pub historical_p50: i64,
+    pub historical_p90: i64,
+    pub historical_max: i64,
+    pub historical_blocks: i64,
+}
+
+const BLOCK_HOURS: i64 = 5;
+const HISTORICAL_WINDOW_DAYS: i64 = 30;
+
+/// Walk recent messages to bucket them into 5h Claude blocks; return total tokens
+/// per block (oldest first). Used for both the current-block calc and historical stats.
+fn collect_blocks(db: &Db, since: &str) -> Result<Vec<(DateTime<Utc>, i64, i64, i64, i64, f64, i64)>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT ts, input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd
+         FROM messages WHERE ts >= ?1 ORDER BY ts ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, f64>(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let block_dur = Duration::hours(BLOCK_HOURS);
+    let mut blocks: Vec<(DateTime<Utc>, i64, i64, i64, i64, f64, i64)> = Vec::new();
+    let mut cur: Option<(DateTime<Utc>, i64, i64, i64, i64, f64, i64)> = None;
+    for (ts, i, o, w, r, c) in rows {
+        let Ok(dt) = DateTime::parse_from_rfc3339(&ts) else { continue };
+        let dt = dt.with_timezone(&Utc);
+        match cur {
+            None => cur = Some((dt, i, o, w, r, c, 1)),
+            Some((bs, ai, ao, aw, ar, ac, am)) => {
+                if dt > bs + block_dur {
+                    blocks.push((bs, ai, ao, aw, ar, ac, am));
+                    cur = Some((dt, i, o, w, r, c, 1));
+                } else {
+                    cur = Some((bs, ai + i, ao + o, aw + w, ar + r, ac + c, am + 1));
+                }
+            }
+        }
+    }
+    if let Some(b) = cur {
+        blocks.push(b);
+    }
+    Ok(blocks)
+}
+
+fn percentile_sorted(sorted: &[i64], pct: f64) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() - 1) as f64 * pct).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+pub fn block_usage(db: &Db) -> Result<BlockUsage> {
+    let now = Utc::now();
+    // Pull the historical window in one shot so we can compute both the current block
+    // and the historical baseline without two passes through the index.
+    let history_cutoff = (now - Duration::days(HISTORICAL_WINDOW_DAYS)).to_rfc3339();
+    let blocks = collect_blocks(db, &history_cutoff)?;
+
+    // Block sums (input+output+cache_w+cache_r) used for the historical baseline.
+    // Exclude the latest block if it's still active so we don't bias the baseline downward.
+    let block_dur = Duration::hours(BLOCK_HOURS);
+    let mut totals: Vec<i64> = blocks
+        .iter()
+        .filter(|(bs, _, _, _, _, _, _)| now >= *bs + block_dur)
+        .map(|(_, i, o, w, r, _, _)| i + o + w + r)
+        .collect();
+    totals.sort_unstable();
+    let historical_blocks = totals.len() as i64;
+    let historical_p50 = percentile_sorted(&totals, 0.5);
+    let historical_p90 = percentile_sorted(&totals, 0.9);
+    let historical_max = *totals.last().unwrap_or(&0);
+    // Use historical max as the auto-detected ceiling; it represents the highest the
+    // user has pushed a block without (presumably) being throttled.
+    let auto_limit_tokens = historical_max;
+
+    let manual_limit = get_setting_i64(db, "block_limit_tokens").unwrap_or(0);
+    let (limit_tokens, limit_source) = if manual_limit > 0 {
+        (manual_limit, "manual".to_string())
+    } else if auto_limit_tokens > 0 {
+        (auto_limit_tokens, "auto".to_string())
+    } else {
+        (0, "none".to_string())
+    };
+
+    let Some(&(bs, input, output, cw, cr, cost, msgs)) = blocks.last() else {
+        return Ok(BlockUsage {
+            active: false,
+            block_start: String::new(),
+            block_end: String::new(),
+            now: now.to_rfc3339(),
+            seconds_remaining: 0,
+            tokens: 0,
+            input_tok: 0,
+            output_tok: 0,
+            cache_w_tok: 0,
+            cache_r_tok: 0,
+            cost_usd: 0.0,
+            msgs: 0,
+            limit_tokens,
+            limit_source,
+            auto_limit_tokens,
+            historical_p50,
+            historical_p90,
+            historical_max,
+            historical_blocks,
+        });
+    };
+    let be = bs + block_dur;
+    let active = now < be;
+    let seconds_remaining = (be - now).num_seconds().max(0);
+    Ok(BlockUsage {
+        active,
+        block_start: bs.to_rfc3339(),
+        block_end: be.to_rfc3339(),
+        now: now.to_rfc3339(),
+        seconds_remaining,
+        tokens: input + output + cw + cr,
+        input_tok: input,
+        output_tok: output,
+        cache_w_tok: cw,
+        cache_r_tok: cr,
+        cost_usd: cost,
+        msgs,
+        limit_tokens,
+        limit_source,
+        auto_limit_tokens,
+        historical_p50,
+        historical_p90,
+        historical_max,
+        historical_blocks,
+    })
+}
+
+pub fn get_setting(db: &Db, key: &str) -> Result<Option<String>> {
+    let mut stmt = db
+        .conn
+        .prepare("SELECT value FROM settings WHERE key = ?1")?;
+    let mut rows = stmt.query(params![key])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_setting(db: &Db, key: &str, value: &str) -> Result<()> {
+    db.conn.execute(
+        "INSERT INTO settings(key, value) VALUES(?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn get_setting_i64(db: &Db, key: &str) -> Option<i64> {
+    get_setting(db, key).ok().flatten().and_then(|v| v.parse().ok())
 }

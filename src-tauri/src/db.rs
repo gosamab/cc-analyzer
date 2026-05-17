@@ -58,7 +58,33 @@ impl Db {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS session_titles (
+                session_id TEXT PRIMARY KEY,
+                title      TEXT NOT NULL
+            );
             "#,
+        )?;
+        // First time session_titles is empty but we already have messages: reset
+        // file offsets so the next refresh re-scans files for ai-title lines.
+        // INSERT OR IGNORE on messages makes the re-scan a no-op for rows we have.
+        let need_backfill: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages LIMIT 1)
+                  AND NOT EXISTS(SELECT 1 FROM session_titles LIMIT 1)",
+            [],
+            |r| r.get(0),
+        )?;
+        if need_backfill {
+            self.conn.execute("DELETE FROM file_offsets", [])?;
+        }
+        Ok(())
+    }
+
+    pub fn upsert_title(&self, session_id: &str, title: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_titles(session_id, title) VALUES(?1, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET title = excluded.title",
+            params![session_id, title],
         )?;
         Ok(())
     }

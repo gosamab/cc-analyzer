@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ipc, type SessionRow, type SessionDetail, type TurnRow } from "../ipc";
   import { ui } from "../store.svelte";
-  import { fmtUsd, fmtUsdShort, fmtInt, fmtTok, fmtDuration, isoRange, shortProject, shortSession } from "../format";
+  import { fmtUsd, fmtUsdShort, fmtInt, fmtTok, fmtDuration, isoRange, shortProject, shortSession, redactPath, redactText } from "../format";
   import RangePicker from "../components/RangePicker.svelte";
 
   let allSessions = $state<SessionRow[]>([]);
@@ -44,6 +44,19 @@
       .finally(() => (loading = false));
   });
 
+  // React to deep-links from other views (Insights "Open session" etc.) — load
+  // the detail and scroll the matching list row into view.
+  $effect(() => {
+    const id = ui.selectedSession;
+    if (!id) return;
+    if (detail?.session_id !== id) loadDetail(id);
+    // Defer scroll to next frame so the row exists in the DOM.
+    queueMicrotask(() => {
+      const row = document.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
+      row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  });
+
   const projects = $derived([...new Set(allSessions.map((s) => s.project))].sort());
   const models = $derived([...new Set(allSessions.map((s) => s.model))].sort());
 
@@ -58,7 +71,8 @@
       s = s.filter(
         (x) =>
           x.session_id.toLowerCase().includes(q) ||
-          x.project.toLowerCase().includes(q)
+          x.project.toLowerCase().includes(q) ||
+          (x.title?.toLowerCase().includes(q) ?? false)
       );
     }
     if (!sortField) return s;
@@ -176,8 +190,6 @@
 <div class="flex flex-col h-full">
   <!-- Horizontal filter bar -->
   <div class="border-b border-border bg-panel/60 px-4 py-2 flex items-center gap-3 flex-wrap text-sm">
-    <RangePicker />
-
     <select
       class="bg-panel2 border border-border rounded px-2 py-1 text-sm min-w-[10rem]"
       bind:value={ui.projectFilter}
@@ -231,8 +243,11 @@
       <button class="btn text-xs" onclick={clearAll}>Clear</button>
     {/if}
 
-    <div class="ml-auto text-xs text-muted num">
-      {filtered.length} / {allSessions.length} sessions
+    <div class="ml-auto flex items-center gap-3">
+      <div class="text-xs text-muted num">
+        {filtered.length} / {allSessions.length} sessions
+      </div>
+      <RangePicker />
     </div>
   </div>
 
@@ -241,7 +256,7 @@
     <section class="border-r border-border overflow-auto">
       <div class="sticky top-0 bg-panel border-b border-border px-3 py-2 text-xs text-muted flex items-center gap-3">
         <button class="w-20 shrink-0 text-left hover:text-ink" onclick={() => toggleSort("session")}>Session{sortArrow("session")}</button>
-        <button class="flex-[2] min-w-0 text-left hover:text-ink" onclick={() => toggleSort("project")}>Project{sortArrow("project")}</button>
+        <button class="flex-[2] min-w-0 text-left hover:text-ink" onclick={() => toggleSort("project")}>Title · Project{sortArrow("project")}</button>
         <button class="flex-1 min-w-[3rem] text-right hover:text-ink" onclick={() => toggleSort("turns")}>Turns{sortArrow("turns")}</button>
         <button class="flex-1 min-w-[4rem] text-right hover:text-ink" onclick={() => toggleSort("tokens")}>Tokens{sortArrow("tokens")}</button>
         <button class="flex-1 min-w-[4rem] text-right hover:text-ink" onclick={() => toggleSort("cost")}>Cost{sortArrow("cost")}</button>
@@ -255,11 +270,19 @@
         {#each filtered as s}
           <button
             class="w-full px-3 py-2 text-sm flex items-center gap-3 border-b border-border row-hover {ui.selectedSession === s.session_id ? 'bg-panel2' : ''}"
+            data-session-id={s.session_id}
             onclick={() => loadDetail(s.session_id)}
-            title={s.project}
+            title={s.title ? `${s.title}\n${s.project}` : s.project}
           >
             <div class="w-20 shrink-0 num text-muted text-left">{shortSession(s.session_id)}</div>
-            <div class="flex-[2] min-w-0 truncate text-left">{shortProject(s.project)}</div>
+            <div class="flex-[2] min-w-0 text-left">
+              {#if s.title}
+                <div class="truncate text-ink">{s.title}</div>
+                <div class="truncate text-xs text-muted">{shortProject(s.project)}</div>
+              {:else}
+                <div class="truncate">{shortProject(s.project)}</div>
+              {/if}
+            </div>
             <div class="flex-1 min-w-[3rem] text-right num">{fmtInt(s.msgs)}</div>
             <div class="flex-1 min-w-[4rem] text-right num">{fmtTok(s.tokens_total)}</div>
             <div class="flex-1 min-w-[4rem] text-right num text-muted" title={fmtUsd(s.cost_usd)}>{fmtUsdShort(s.cost_usd)}</div>
@@ -276,8 +299,12 @@
         <div>
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
-              <h2 class="text-base font-medium truncate" title={detail.project}>{shortProject(detail.project)}</h2>
-              <div class="text-xs text-muted num">{detail.session_id}</div>
+              <h2 class="text-base font-medium truncate" title={detail.title ?? detail.project}>
+                {detail.title ?? shortProject(detail.project)}
+              </h2>
+              <div class="text-xs text-muted truncate">
+                {#if detail.title}{shortProject(detail.project)} · {/if}<span class="num">{detail.session_id}</span>
+              </div>
             </div>
             <span class="pill shrink-0 whitespace-nowrap">{detail.model.replace("claude-", "")}</span>
           </div>
@@ -381,7 +408,7 @@
             <div class="space-y-1 text-sm">
               {#each detail.top_files.slice(0, 10) as f}
                 <div class="flex justify-between gap-2">
-                  <span class="text-muted truncate" title={f.file_path}>{f.file_path.split("/").pop()}</span>
+                  <span class="text-muted truncate" title={redactText(f.file_path)}>{redactPath(f.file_path.split("/").pop() ?? f.file_path)}</span>
                   <span class="num">{f.count}</span>
                 </div>
               {/each}

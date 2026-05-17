@@ -1,4 +1,40 @@
-import { currency } from "./store.svelte";
+import { currency, privacy } from "./store.svelte";
+
+// Stable 6-char hash (FNV-1a) used by privacy mode so the same input always
+// redacts to the same placeholder — patterns across rows stay visible.
+function shortHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36).padStart(6, "0").slice(0, 6);
+}
+
+// Match path-like substrings inside free text: absolute home/temp paths,
+// home-relative (~/), and the `…/Project/Name` shortened-project form the
+// Rust side produces in rec bodies. Stops at shell metachars/whitespace.
+const PATH_RE =
+  /(\/Users\/[^\s"',;|&<>()`]+|~\/[^\s"',;|&<>()`]+|\/tmp\/[^\s"',;|&<>()`]+|\/private\/[^\s"',;|&<>()`]+|\/Volumes\/[^\s"',;|&<>()`]+|\/home\/[^\s"',;|&<>()`]+|…\/[^\s"',;|&<>()`]+)/g;
+
+/** When privacy is on, redact path-like substrings in arbitrary text. */
+export const redactText = (s: string): string => {
+  if (!privacy.enabled || !s) return s;
+  return s.replace(PATH_RE, (m) => `<path:${shortHash(m)}>`);
+};
+
+/** Redact a project identifier (the directory under ~/.claude/projects). */
+export const redactProject = (p: string): string => {
+  if (!privacy.enabled || !p) return p;
+  return `proj-${shortHash(p)}`;
+};
+
+/** Redact a single file path; keeps the extension if any. */
+export const redactPath = (p: string): string => {
+  if (!privacy.enabled || !p) return p;
+  const ext = p.match(/\.[a-zA-Z0-9]{1,8}$/)?.[0] ?? "";
+  return `<file:${shortHash(p)}${ext}>`;
+};
 
 const intFmt = new Intl.NumberFormat("en-US");
 const decFmt = (d: number) =>
@@ -86,6 +122,7 @@ export const isoRange = (days: number) => ({
 });
 
 export const shortProject = (p: string) => {
+  if (privacy.enabled) return redactProject(p);
   const stripped = p.replace(/^-Users-[^-]+-?/, "").replace(/-/g, "/");
   const parts = stripped.split("/").filter(Boolean);
   if (parts.length <= 2) return stripped || p;
@@ -93,3 +130,16 @@ export const shortProject = (p: string) => {
 };
 
 export const shortSession = (s: string) => s.slice(0, 8);
+
+// Express a token savings figure as a fraction of the user's 5h block ceiling.
+// Returns null when the limit isn't known (so callers can omit the line entirely).
+// Two forms: `short` for table cells (~12% / ~1.9×), full for prose.
+export const impactOfLimit = (tokens: number, limit: number, short = false): string | null => {
+  if (!limit || limit <= 0 || !tokens || tokens <= 0) return null;
+  const ratio = tokens / limit;
+  if (short) {
+    return ratio >= 1 ? `${fmtDec(ratio, 1)}×` : fmtPct(ratio * 100, 0);
+  }
+  if (ratio >= 1) return `~${fmtDec(ratio, 1)}× a 5h block`;
+  return `~${fmtPct(ratio * 100, 0)} of a 5h block`;
+};
