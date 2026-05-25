@@ -1,6 +1,6 @@
 [package]
 name = "cc-analyzer"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-first Claude Code usage analyzer"
 authors = ["Osama"]
 edition = "2021"
