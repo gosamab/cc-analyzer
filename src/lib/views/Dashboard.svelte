@@ -25,7 +25,6 @@
   let selectedDay = $state(today());
   let dashTab = $state<"today" | "trends">("trends");
 
-  // Limit editor state
   let limitInput = $state("");
   let editingLimit = $state(false);
   let savingLimit = $state(false);
@@ -122,7 +121,6 @@
   );
 
 
-  // Gantt: group blocks by top_project; place by clock-time.
   const ganttRows = $derived.by(() => {
     if (!util?.blocks.length) return [];
     const byProj: Record<string, typeof util.blocks> = {};
@@ -147,7 +145,6 @@
   const sevColor = (s: string) =>
     s === "HIGH" ? "pill-err" : s === "MED" ? "pill-warn" : "pill-ok";
 
-  // Donut slices for project/model breakdowns.
   type DonutSlice<T> = { label: string; value: number; raw: T | null };
   const projTotal = $derived(
     summary ? summary.by_project.reduce((a, p) => a + p.tokens_total, 0) : 0
@@ -169,7 +166,6 @@
   });
   const modelTotal = $derived(modelSlices.reduce((a, s) => a + s.value, 0));
 
-  // ---- Block (5h) helpers ----
   const blockPct = $derived.by(() => {
     if (!block || block.limit_tokens <= 0) return 0;
     return Math.min(100, (block.tokens / block.limit_tokens) * 100);
@@ -216,7 +212,6 @@
     }
   }
 
-  // ---- Day picker ----
   const dayShortcuts = $derived([
     { label: "Today", value: today() },
     { label: "Yesterday", value: daysAgo(1) },
@@ -255,7 +250,6 @@
   {:else if summary}
 
     {#if dashTab === "today"}
-    <!-- 5h block usage -->
     <div class="card">
       <div class="flex items-baseline justify-between mb-2">
         <div class="card-title !mb-0">Current 5h block</div>
@@ -314,7 +308,6 @@
           <div class="text-xs text-muted">Not enough history yet — once you have a few 5h blocks logged, an auto-ceiling will appear here.</div>
         {/if}
 
-        <!-- Override (collapsed by default) -->
         <div class="mt-3 flex items-center gap-2 text-xs">
           {#if editingLimit}
             <input
@@ -355,7 +348,6 @@
     {/if}
 
     {#if dashTab === "trends"}
-    <!-- KPI strip with sparklines -->
     <div class="grid grid-cols-4 gap-4">
       <div class="card">
         <div class="card-title">Tokens · {ui.range}d</div>
@@ -395,7 +387,6 @@
       </div>
     </div>
 
-    <!-- Donuts (left, single card with both side-by-side) + Recommendations (right) -->
     <div class="grid grid-cols-2 gap-4 items-start">
       <div class="card">
         <div class="grid grid-cols-2 gap-4">
@@ -506,7 +497,6 @@
     {/if}
 
     {#if dashTab === "today"}
-    <!-- Day-scoped: Gantt timeline + hourly heatmap -->
     <div class="space-y-2">
       <div class="flex items-center justify-between">
         <div class="text-xs text-muted uppercase tracking-wider">

@@ -2,6 +2,9 @@
   import { ipc, type CacheStats, type PricingRow } from "../ipc";
   import { currency, theme } from "../store.svelte";
   import { fmtInt, fmtUsd } from "../format";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { check } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
 
   // Currency presets — USD→target rates are user-editable below.
   const currencyPresets: Record<string, number> = {
@@ -86,7 +89,57 @@
 
   $effect(() => {
     load();
+    getVersion().then((v) => (appVersion = v)).catch(() => {});
   });
+
+  let appVersion = $state<string>("");
+  let updateStatus = $state<string>("");
+  let updateAvailable = $state<{ version: string; notes: string } | null>(null);
+  let checking = $state(false);
+  let installing = $state(false);
+  let downloaded = $state(0);
+  let downloadTotal = $state(0);
+
+  async function checkForUpdates() {
+    checking = true;
+    updateStatus = "";
+    updateAvailable = null;
+    try {
+      const upd = await check();
+      if (upd) {
+        updateAvailable = { version: upd.version, notes: upd.body ?? "" };
+        updateStatus = `Update available: ${upd.version}`;
+      } else {
+        updateStatus = "You're on the latest version.";
+      }
+    } catch (e) {
+      updateStatus = `Check failed: ${e}`;
+    } finally {
+      checking = false;
+    }
+  }
+
+  async function installUpdate() {
+    installing = true;
+    downloaded = 0;
+    downloadTotal = 0;
+    try {
+      const upd = await check();
+      if (!upd) {
+        updateStatus = "No update to install.";
+        return;
+      }
+      await upd.downloadAndInstall((evt) => {
+        if (evt.event === "Started") downloadTotal = evt.data.contentLength ?? 0;
+        else if (evt.event === "Progress") downloaded += evt.data.chunkLength;
+      });
+      await relaunch();
+    } catch (e) {
+      updateStatus = `Install failed: ${e}`;
+    } finally {
+      installing = false;
+    }
+  }
 
   async function onClearCache() {
     const ok = confirm(
@@ -116,7 +169,6 @@
 <div class="p-6 space-y-4 max-w-3xl">
   <h1 class="text-lg font-semibold">Settings</h1>
 
-  <!-- Theme -->
   <div class="card space-y-3">
     <div class="card-title">Appearance</div>
     <div class="flex gap-2">
@@ -139,7 +191,6 @@
     </div>
   </div>
 
-  <!-- Currency -->
   <div class="card space-y-3">
     <div class="card-title">Display currency</div>
     <div class="text-xs text-muted">
@@ -184,7 +235,6 @@
     </div>
   </div>
 
-  <!-- Data location -->
   <div class="card space-y-2">
     <div class="card-title">Data location</div>
     <div class="text-sm text-muted">
@@ -195,7 +245,6 @@
     </div>
   </div>
 
-  <!-- Cache stats -->
   <div class="card space-y-3">
     <div class="card-title flex items-center justify-between">
       <span>Local cache</span>
@@ -235,7 +284,6 @@
     {/if}
   </div>
 
-  <!-- Pricing -->
   <div class="card space-y-3">
     <div class="card-title flex items-center justify-between">
       <span>Pricing (USD per 1M tokens)</span>
@@ -304,11 +352,31 @@
     {/if}
   </div>
 
-  <!-- M5 placeholder -->
-  <div class="card space-y-2">
-    <div class="card-title">Background mode (M5)</div>
-    <div class="text-sm text-muted">
-      Menu-bar agent + advisory notifications. Not yet implemented.
+  <div class="card space-y-3">
+    <div class="card-title flex items-center justify-between">
+      <span>Updates</span>
+      <span class="text-xs text-muted num">v{appVersion || "—"}</span>
     </div>
+    <div class="flex items-center gap-2">
+      <button class="btn text-xs" onclick={checkForUpdates} disabled={checking || installing}>
+        {checking ? "Checking…" : "Check for updates"}
+      </button>
+      {#if updateAvailable}
+        <button class="btn text-xs" onclick={installUpdate} disabled={installing}>
+          {installing
+            ? downloadTotal
+              ? `Downloading ${Math.round((downloaded / downloadTotal) * 100)}%`
+              : "Installing…"
+            : `Install ${updateAvailable.version} & relaunch`}
+        </button>
+      {/if}
+      {#if updateStatus}
+        <span class="text-xs text-muted">{updateStatus}</span>
+      {/if}
+    </div>
+    {#if updateAvailable?.notes}
+      <pre class="text-xs text-muted whitespace-pre-wrap max-h-32 overflow-y-auto">{updateAvailable.notes}</pre>
+    {/if}
   </div>
+
 </div>

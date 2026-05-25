@@ -16,10 +16,19 @@ pub fn run() {
     db.init_schema().expect("failed to init schema");
     pricing::load_from_db(&db).ok();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .manage(AppState { db: Mutex::new(db) })
         .invoke_handler(tauri::generate_handler![
             commands::refresh_logs,

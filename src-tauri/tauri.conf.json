@@ -27,13 +27,34 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg", "nsis", "appimage"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.png"
     ],
     "category": "DeveloperTool",
     "shortDescription": "Analyze local Claude Code usage",
-    "longDescription": "Offline analyzer for Claude Code JSONL logs — cost, utilization, recommendations."
+    "longDescription": "Offline analyzer for Claude Code JSONL logs — cost, utilization, recommendations.",
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkzMzM5QjQ0NEE3QzE0NDAKUldSQUZIeEtSSnN6azY4ZEpvOXlUQVFFbjM2YTNhcWd6ejBkS1JqRk1OVGtDU3FWakhTL2xwNTEK",
+      "endpoints": [
+        "https://github.com/gosamab/cc-analyzer/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

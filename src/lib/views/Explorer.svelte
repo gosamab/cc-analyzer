@@ -8,7 +8,6 @@
   let detail = $state<SessionDetail | null>(null);
   let loading = $state(true);
 
-  // Filters
   let modelFilter = $state<string>("");
   let minTokens = $state<number>(0);
   let minTurns = $state<number>(0);
@@ -188,7 +187,6 @@
 </script>
 
 <div class="flex flex-col h-full">
-  <!-- Horizontal filter bar -->
   <div class="border-b border-border bg-panel/60 px-4 py-2 flex items-center gap-3 flex-wrap text-sm">
     <select
       class="bg-panel2 border border-border rounded px-2 py-1 text-sm min-w-[10rem]"
@@ -251,7 +249,6 @@
     </div>
   </div>
 
-  <!-- Sessions list + Detail -->
   <div class="grid grid-cols-2 flex-1 min-h-0">
     <section class="border-r border-border overflow-auto">
       <div class="sticky top-0 bg-panel border-b border-border px-3 py-2 text-xs text-muted flex items-center gap-3">
