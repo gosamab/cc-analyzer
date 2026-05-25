@@ -67,6 +67,7 @@ export type TurnRow = {
   tools: TurnTool[];
 };
 export type FileRow = { file_path: string; count: number };
+export type NameCount = { name: string; count: number };
 export type SessionDetail = {
   session_id: string;
   project: string;
@@ -81,6 +82,9 @@ export type SessionDetail = {
   turns: TurnRow[];
   top_files: FileRow[];
   tool_counts: Record<string, number>;
+  skills_used: NameCount[];
+  mcps_used: NameCount[];
+  slash_commands: NameCount[];
 };
 export type Recommendation = {
   key: string;
@@ -145,6 +149,30 @@ export type ToolUsageRow = {
   turns: number;
 };
 
+export type SkillUsageRow = {
+  skill: string;
+  count: number;
+  tokens: number;
+  cost_usd: number;
+  turns: number;
+  sessions: number;
+};
+export type McpUsageRow = {
+  server: string;
+  tool: string;
+  short: string;
+  count: number;
+  tokens: number;
+  cost_usd: number;
+  turns: number;
+  sessions: number;
+};
+export type SlashCommandRow = {
+  cmd: string;
+  count: number;
+  sessions: number;
+};
+
 export type CacheStats = {
   messages: number;
   sessions: number;
@@ -200,6 +228,12 @@ export const ipc = {
     invoke<CommandRow[]>("top_commands", { since, until, limit }),
   toolUsage: (since: string, until: string) =>
     invoke<ToolUsageRow[]>("tool_usage", { since, until }),
+  skillUsage: (since: string, until: string) =>
+    invoke<SkillUsageRow[]>("skill_usage", { since, until }),
+  mcpUsage: (since: string, until: string) =>
+    invoke<McpUsageRow[]>("mcp_usage", { since, until }),
+  slashCommandUsage: (since: string, until: string) =>
+    invoke<SlashCommandRow[]>("slash_command_usage", { since, until }),
   utilization: (day: string) => invoke<Utilization>("utilization", { day }),
   cacheStats: () => invoke<CacheStats>("cache_stats"),
   clearCache: () => invoke<void>("clear_cache"),

@@ -734,6 +734,221 @@ pub fn tool_usage(db: &Db, since: &str, until: &str) -> Result<Vec<ToolUsageRow>
     Ok(out)
 }
 
+#[derive(Serialize)]
+pub struct SkillUsageRow {
+    pub skill: String,
+    pub count: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    pub turns: i64,
+    pub sessions: i64,
+}
+
+/// Aggregate Skill tool calls by the actual skill name (input.skill captured
+/// at parse time). Each tool call is charged (turn_tokens / tools_in_turn) so
+/// multi-tool turns don't double-count.
+pub fn skill_usage(db: &Db, since: &str, until: &str) -> Result<Vec<SkillUsageRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT session_id, input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd, tools_json
+         FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    struct Agg {
+        count: i64,
+        cost: f64,
+        tokens: i64,
+        turns: i64,
+        sessions: std::collections::HashSet<String>,
+    }
+    let mut agg: HashMap<String, Agg> = HashMap::new();
+    while let Some(r) = rows.next()? {
+        let sid: String = r.get(0)?;
+        let inp: i64 = r.get(1)?;
+        let out: i64 = r.get(2)?;
+        let cw: i64 = r.get(3)?;
+        let cr: i64 = r.get(4)?;
+        let cost: f64 = r.get(5)?;
+        let json: String = r.get(6)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        if tools.is_empty() { continue; }
+        let n_tools = tools.len() as f64;
+        let per_call_tokens = ((inp + out + cw + cr) as f64 / n_tools) as i64;
+        let per_call_cost = cost / n_tools;
+        let mut turn_skills: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for t in tools {
+            if t.get("name").and_then(|v| v.as_str()) != Some("Skill") { continue; }
+            let skill = t
+                .get("skill")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)")
+                .to_string();
+            let entry = agg.entry(skill.clone()).or_insert_with(|| Agg {
+                count: 0,
+                cost: 0.0,
+                tokens: 0,
+                turns: 0,
+                sessions: std::collections::HashSet::new(),
+            });
+            entry.count += 1;
+            entry.cost += per_call_cost;
+            entry.tokens += per_call_tokens;
+            entry.sessions.insert(sid.clone());
+            turn_skills.insert(skill);
+        }
+        for skill in turn_skills {
+            agg.entry(skill).or_insert_with(|| Agg {
+                count: 0,
+                cost: 0.0,
+                tokens: 0,
+                turns: 0,
+                sessions: std::collections::HashSet::new(),
+            }).turns += 1;
+        }
+    }
+    let mut out: Vec<SkillUsageRow> = agg
+        .into_iter()
+        .map(|(skill, a)| SkillUsageRow {
+            skill,
+            count: a.count,
+            tokens: a.tokens,
+            cost_usd: a.cost,
+            turns: a.turns,
+            sessions: a.sessions.len() as i64,
+        })
+        .collect();
+    out.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    Ok(out)
+}
+
+#[derive(Serialize)]
+pub struct McpUsageRow {
+    pub server: String,
+    pub tool: String, // full mcp__server__tool name
+    pub short: String, // just the tool portion
+    pub count: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    pub turns: i64,
+    pub sessions: i64,
+}
+
+/// Aggregate MCP tool calls (any tool name starting with `mcp__`). The full
+/// name is `mcp__<server>__<tool>`; we split out the server so the UI can roll
+/// up by server.
+pub fn mcp_usage(db: &Db, since: &str, until: &str) -> Result<Vec<McpUsageRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT session_id, input_tok, output_tok, cache_w_tok, cache_r_tok, cost_usd, tools_json
+         FROM messages
+         WHERE ts >= ?1 AND ts < ?2 AND tools_json != '[]'",
+    )?;
+    let mut rows = stmt.query(params![since, until])?;
+    struct Agg {
+        server: String,
+        short: String,
+        count: i64,
+        cost: f64,
+        tokens: i64,
+        turns: i64,
+        sessions: std::collections::HashSet<String>,
+    }
+    let mut agg: HashMap<String, Agg> = HashMap::new();
+    while let Some(r) = rows.next()? {
+        let sid: String = r.get(0)?;
+        let inp: i64 = r.get(1)?;
+        let out: i64 = r.get(2)?;
+        let cw: i64 = r.get(3)?;
+        let cr: i64 = r.get(4)?;
+        let cost: f64 = r.get(5)?;
+        let json: String = r.get(6)?;
+        let Ok(tools) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else { continue };
+        if tools.is_empty() { continue; }
+        let n_tools = tools.len() as f64;
+        let per_call_tokens = ((inp + out + cw + cr) as f64 / n_tools) as i64;
+        let per_call_cost = cost / n_tools;
+        let mut turn_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for t in tools {
+            let Some(name) = t.get("name").and_then(|v| v.as_str()) else { continue };
+            if !name.starts_with("mcp__") { continue; }
+            let (server, short) = split_mcp_name(name);
+            let entry = agg.entry(name.to_string()).or_insert_with(|| Agg {
+                server: server.clone(),
+                short: short.clone(),
+                count: 0,
+                cost: 0.0,
+                tokens: 0,
+                turns: 0,
+                sessions: std::collections::HashSet::new(),
+            });
+            entry.count += 1;
+            entry.cost += per_call_cost;
+            entry.tokens += per_call_tokens;
+            entry.sessions.insert(sid.clone());
+            turn_tools.insert(name.to_string());
+        }
+        for name in turn_tools {
+            if let Some(e) = agg.get_mut(&name) {
+                e.turns += 1;
+            }
+        }
+    }
+    let mut out: Vec<McpUsageRow> = agg
+        .into_iter()
+        .map(|(tool, a)| McpUsageRow {
+            server: a.server,
+            tool,
+            short: a.short,
+            count: a.count,
+            tokens: a.tokens,
+            cost_usd: a.cost,
+            turns: a.turns,
+            sessions: a.sessions.len() as i64,
+        })
+        .collect();
+    out.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    Ok(out)
+}
+
+fn split_mcp_name(name: &str) -> (String, String) {
+    // name: "mcp__<server>__<tool>" — server can contain underscores, so split
+    // on the LAST `__` after the `mcp__` prefix.
+    let rest = name.strip_prefix("mcp__").unwrap_or(name);
+    if let Some(idx) = rest.rfind("__") {
+        (rest[..idx].to_string(), rest[idx + 2..].to_string())
+    } else {
+        (rest.to_string(), String::new())
+    }
+}
+
+#[derive(Serialize)]
+pub struct SlashCommandRow {
+    pub cmd: String,
+    pub count: i64,
+    pub sessions: i64,
+}
+
+pub fn slash_command_usage(db: &Db, since: &str, until: &str) -> Result<Vec<SlashCommandRow>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT cmd, COUNT(*), COUNT(DISTINCT session_id)
+         FROM slash_commands
+         WHERE ts >= ?1 AND ts < ?2
+         GROUP BY cmd
+         ORDER BY 2 DESC",
+    )?;
+    let rows = stmt.query_map(params![since, until], |r| {
+        Ok(SlashCommandRow {
+            cmd: r.get(0)?,
+            count: r.get(1)?,
+            sessions: r.get(2)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Top Bash commands in the range with attributed token + cost cost.
 /// Each tool call inside a turn is charged (turn_tokens / tools_in_turn) — so
 /// a multi-tool turn splits its replay cost across its calls. Commands are
@@ -1687,6 +1902,15 @@ pub struct SessionDetail {
     pub turns: Vec<TurnRow>,
     pub top_files: Vec<FileRow>,
     pub tool_counts: HashMap<String, i64>,
+    pub skills_used: Vec<NameCount>,
+    pub mcps_used: Vec<NameCount>,
+    pub slash_commands: Vec<NameCount>,
+}
+
+#[derive(Serialize)]
+pub struct NameCount {
+    pub name: String,
+    pub count: i64,
 }
 
 #[derive(Serialize)]
@@ -1816,6 +2040,8 @@ pub fn session_detail(db: &Db, session_id: &str) -> Result<SessionDetail> {
     let mut turns = Vec::new();
     let mut file_counts: HashMap<String, i64> = HashMap::new();
     let mut tool_counts: HashMap<String, i64> = HashMap::new();
+    let mut skill_counts: HashMap<String, i64> = HashMap::new();
+    let mut mcp_counts: HashMap<String, i64> = HashMap::new();
     while let Some(r) = rows.next()? {
         let ts: String = r.get(0)?;
         let cost: f64 = r.get(1)?;
@@ -1834,6 +2060,15 @@ pub fn session_detail(db: &Db, session_id: &str) -> Result<SessionDetail> {
                     if let Some(fp) = t.get("file_path").and_then(|v| v.as_str()) {
                         *file_counts.entry(fp.to_string()).or_default() += 1;
                     }
+                } else if name == "Skill" {
+                    let s = t
+                        .get("skill")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(unknown)")
+                        .to_string();
+                    *skill_counts.entry(s).or_default() += 1;
+                } else if name.starts_with("mcp__") {
+                    *mcp_counts.entry(name.to_string()).or_default() += 1;
                 }
             }
         }
@@ -1868,6 +2103,30 @@ pub fn session_detail(db: &Db, session_id: &str) -> Result<SessionDetail> {
             |r| r.get(0),
         )
         .ok();
+
+    let mut skills_used: Vec<NameCount> = skill_counts
+        .into_iter()
+        .map(|(name, count)| NameCount { name, count })
+        .collect();
+    skills_used.sort_by(|a, b| b.count.cmp(&a.count));
+    let mut mcps_used: Vec<NameCount> = mcp_counts
+        .into_iter()
+        .map(|(name, count)| NameCount { name, count })
+        .collect();
+    mcps_used.sort_by(|a, b| b.count.cmp(&a.count));
+
+    let mut stmt = db.conn.prepare(
+        "SELECT cmd, COUNT(*) FROM slash_commands
+         WHERE session_id = ?1
+         GROUP BY cmd
+         ORDER BY 2 DESC",
+    )?;
+    let mut slash_rows = stmt.query(params![session_id])?;
+    let mut slash_commands: Vec<NameCount> = Vec::new();
+    while let Some(r) = slash_rows.next()? {
+        slash_commands.push(NameCount { name: r.get(0)?, count: r.get(1)? });
+    }
+
     Ok(SessionDetail {
         session_id: session_id.to_string(),
         project,
@@ -1882,6 +2141,9 @@ pub fn session_detail(db: &Db, session_id: &str) -> Result<SessionDetail> {
         turns,
         top_files,
         tool_counts,
+        skills_used,
+        mcps_used,
+        slash_commands,
     })
 }
 

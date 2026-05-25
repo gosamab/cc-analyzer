@@ -82,6 +82,36 @@ pub fn tool_usage(
 }
 
 #[tauri::command]
+pub fn skill_usage(
+    state: State<'_, AppState>,
+    since: String,
+    until: String,
+) -> Result<Vec<analyze::SkillUsageRow>, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::skill_usage(&db, &since, &until).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn mcp_usage(
+    state: State<'_, AppState>,
+    since: String,
+    until: String,
+) -> Result<Vec<analyze::McpUsageRow>, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::mcp_usage(&db, &since, &until).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn slash_command_usage(
+    state: State<'_, AppState>,
+    since: String,
+    until: String,
+) -> Result<Vec<analyze::SlashCommandRow>, String> {
+    let db = state.db.lock().map_err(map_err)?;
+    analyze::slash_command_usage(&db, &since, &until).map_err(map_err)
+}
+
+#[tauri::command]
 pub fn top_commands(
     state: State<'_, AppState>,
     since: String,

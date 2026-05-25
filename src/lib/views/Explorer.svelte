@@ -415,6 +415,58 @@
             </div>
           </div>
         </div>
+
+        {#if detail.skills_used.length || detail.mcps_used.length || detail.slash_commands.length}
+          <div class="grid grid-cols-3 gap-3">
+            <div class="card">
+              <div class="card-title">Skills used</div>
+              {#if detail.skills_used.length}
+                <div class="space-y-1 text-sm">
+                  {#each detail.skills_used.slice(0, 10) as s}
+                    <div class="flex justify-between gap-2">
+                      <span class="text-muted truncate font-mono text-xs" title={s.name}>{s.name}</span>
+                      <span class="num">{fmtInt(s.count)}</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <div class="text-xs text-muted">None</div>
+              {/if}
+            </div>
+            <div class="card">
+              <div class="card-title">MCPs used</div>
+              {#if detail.mcps_used.length}
+                <div class="space-y-1 text-sm">
+                  {#each detail.mcps_used.slice(0, 10) as m}
+                    <div class="flex justify-between gap-2">
+                      <span class="text-muted truncate font-mono text-xs" title={m.name}>
+                        {m.name.startsWith("mcp__") ? m.name.slice(5) : m.name}
+                      </span>
+                      <span class="num">{fmtInt(m.count)}</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <div class="text-xs text-muted">None</div>
+              {/if}
+            </div>
+            <div class="card">
+              <div class="card-title">Slash commands</div>
+              {#if detail.slash_commands.length}
+                <div class="space-y-1 text-sm">
+                  {#each detail.slash_commands.slice(0, 10) as c}
+                    <div class="flex justify-between gap-2">
+                      <span class="text-muted truncate font-mono text-xs" title={c.name}>{c.name}</span>
+                      <span class="num">{fmtInt(c.count)}</span>
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                <div class="text-xs text-muted">None</div>
+              {/if}
+            </div>
+          </div>
+        {/if}
       {/if}
     </section>
   </div>

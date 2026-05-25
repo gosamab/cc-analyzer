@@ -1,15 +1,31 @@
 <script lang="ts">
-  import { ipc, type CommandRow, type ToolUsageRow, type BlockUsage, type CommandCategory } from "../ipc";
+  import {
+    ipc,
+    type CommandRow,
+    type ToolUsageRow,
+    type BlockUsage,
+    type CommandCategory,
+    type SkillUsageRow,
+    type McpUsageRow,
+    type SlashCommandRow,
+  } from "../ipc";
   import { fmtUsd, fmtTok, fmtInt, fmtPct, isoRange, impactOfLimit, redactText } from "../format";
   import { ui } from "../store.svelte";
   import RangePicker from "../components/RangePicker.svelte";
 
   let tools = $state<ToolUsageRow[]>([]);
   let commands = $state<CommandRow[]>([]);
+  let skills = $state<SkillUsageRow[]>([]);
+  let mcps = $state<McpUsageRow[]>([]);
+  let slashes = $state<SlashCommandRow[]>([]);
   let block = $state<BlockUsage | null>(null);
   let loadingTools = $state(true);
   let loadingCmds = $state(true);
-  let tab = $state<"tools" | "bash">("tools");
+  let loadingSkills = $state(true);
+  let loadingMcps = $state(true);
+  let loadingSlash = $state(true);
+  let tab = $state<"tools" | "bash" | "skills" | "mcps" | "slash">("tools");
+  let mcpGroup = $state<"tool" | "server">("tool");
   type CmdFilter = "all" | CommandCategory;
   const cmdFilters: CmdFilter[] = [
     "all", "git", "run", "install", "search", "fs", "inspect", "script", "text", "net", "other",
@@ -28,7 +44,7 @@
     const r = ui.range;
     const { since, until } = isoRange(r);
     const mine = ++reqId;
-    loadingTools = loadingCmds = true;
+    loadingTools = loadingCmds = loadingSkills = loadingMcps = loadingSlash = true;
 
     ipc.toolUsage(since, until)
       .then((x) => { if (mine === reqId) tools = x; })
@@ -39,6 +55,21 @@
       .then((x) => { if (mine === reqId) commands = x; })
       .catch(console.error)
       .finally(() => { if (mine === reqId) loadingCmds = false; });
+
+    ipc.skillUsage(since, until)
+      .then((x) => { if (mine === reqId) skills = x; })
+      .catch(console.error)
+      .finally(() => { if (mine === reqId) loadingSkills = false; });
+
+    ipc.mcpUsage(since, until)
+      .then((x) => { if (mine === reqId) mcps = x; })
+      .catch(console.error)
+      .finally(() => { if (mine === reqId) loadingMcps = false; });
+
+    ipc.slashCommandUsage(since, until)
+      .then((x) => { if (mine === reqId) slashes = x; })
+      .catch(console.error)
+      .finally(() => { if (mine === reqId) loadingSlash = false; });
 
     ipc.blockUsage()
       .then((b) => { if (mine === reqId) block = b; })
@@ -71,6 +102,69 @@
     cost: filteredCmds.reduce((s, c) => s + c.cost_usd, 0),
   });
   let maxCmdTokens = $derived(filteredCmds.reduce((m, c) => Math.max(m, c.tokens), 0));
+
+  let skillTotals = $derived({
+    count: skills.reduce((s, x) => s + x.count, 0),
+    tokens: skills.reduce((s, x) => s + x.tokens, 0),
+    cost: skills.reduce((s, x) => s + x.cost_usd, 0),
+  });
+  let maxSkillTokens = $derived(skills.reduce((m, x) => Math.max(m, x.tokens), 0));
+
+  type McpDisplayRow = {
+    label: string;
+    sub: string;
+    count: number;
+    tokens: number;
+    cost_usd: number;
+    turns: number;
+    sessions: number;
+  };
+  let mcpRows = $derived<McpDisplayRow[]>(
+    mcpGroup === "tool"
+      ? mcps.map((m) => ({
+          label: m.short || m.tool,
+          sub: m.server,
+          count: m.count,
+          tokens: m.tokens,
+          cost_usd: m.cost_usd,
+          turns: m.turns,
+          sessions: m.sessions,
+        }))
+      : Object.values(
+          mcps.reduce<Record<string, McpDisplayRow>>((acc, m) => {
+            const k = m.server;
+            const e = acc[k] ?? {
+              label: k,
+              sub: "",
+              count: 0,
+              tokens: 0,
+              cost_usd: 0,
+              turns: 0,
+              sessions: 0,
+            };
+            e.count += m.count;
+            e.tokens += m.tokens;
+            e.cost_usd += m.cost_usd;
+            e.turns += m.turns;
+            e.sessions = Math.max(e.sessions, m.sessions);
+            acc[k] = e;
+            return acc;
+          }, {}),
+        ).sort((a, b) => b.tokens - a.tokens),
+  );
+  let mcpTotals = $derived({
+    count: mcpRows.reduce((s, x) => s + x.count, 0),
+    tokens: mcpRows.reduce((s, x) => s + x.tokens, 0),
+    cost: mcpRows.reduce((s, x) => s + x.cost_usd, 0),
+  });
+  let maxMcpTokens = $derived(mcpRows.reduce((m, x) => Math.max(m, x.tokens), 0));
+
+  let slashTotals = $derived({
+    count: slashes.reduce((s, x) => s + x.count, 0),
+    tokens: 0,
+    cost: 0,
+  });
+  let maxSlashCount = $derived(slashes.reduce((m, x) => Math.max(m, x.count), 0));
 </script>
 
 <div class="p-6 space-y-4">
@@ -85,7 +179,19 @@
         <button
           class="px-3 py-1 rounded {tab === 'bash' ? 'bg-panel2 text-ink' : 'text-muted hover:text-ink'}"
           onclick={() => (tab = "bash")}
-        >Bash commands</button>
+        >Bash</button>
+        <button
+          class="px-3 py-1 rounded {tab === 'skills' ? 'bg-panel2 text-ink' : 'text-muted hover:text-ink'}"
+          onclick={() => (tab = "skills")}
+        >Skills</button>
+        <button
+          class="px-3 py-1 rounded {tab === 'mcps' ? 'bg-panel2 text-ink' : 'text-muted hover:text-ink'}"
+          onclick={() => (tab = "mcps")}
+        >MCPs</button>
+        <button
+          class="px-3 py-1 rounded {tab === 'slash' ? 'bg-panel2 text-ink' : 'text-muted hover:text-ink'}"
+          onclick={() => (tab = "slash")}
+        >Slash</button>
       </div>
     </div>
     <RangePicker />
@@ -164,7 +270,7 @@
         </table>
       {/if}
     </div>
-  {:else}
+  {:else if tab === "bash"}
     <div class="card !p-0 overflow-hidden">
       <div class="px-5 py-4 border-b border-border flex items-center justify-between gap-4">
         <div class="min-w-0">{@render statStrip(cmdTotals, loadingCmds)}</div>
@@ -243,6 +349,149 @@
                   </td>
                 </tr>
               {/if}
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+  {:else if tab === "skills"}
+    <div class="card !p-0 overflow-hidden">
+      <div class="px-5 py-4 border-b border-border">
+        {@render statStrip(skillTotals, loadingSkills)}
+      </div>
+      {#if !loadingSkills && !skills.length}
+        <div class="p-6 text-muted text-sm">No skill invocations in this range.</div>
+      {:else if !loadingSkills}
+        <table class="w-full text-sm table-fixed">
+          <thead>
+            <tr class="text-xs uppercase tracking-wider text-muted">
+              <th class="text-left font-normal px-5 py-2 w-[30%]">Skill</th>
+              <th class="text-right font-normal px-3 py-2 w-[9%]">Calls</th>
+              <th class="text-right font-normal px-3 py-2 w-[9%]">Turns</th>
+              <th class="text-right font-normal px-3 py-2 w-[9%]">Sessions</th>
+              <th class="text-right font-normal px-3 py-2 w-[11%]">Tokens</th>
+              <th class="text-left font-normal px-3 py-2">Share</th>
+              <th class="text-right font-normal px-3 py-2 w-[12%]">Cost</th>
+              <th class="text-right font-normal pl-3 pr-5 py-2 w-[9%]">% block</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-border/40">
+            {#each skills as s}
+              <tr class="hover:bg-panel2/60">
+                <td class="px-5 py-2.5 truncate text-ink font-mono" title={s.skill}>{s.skill}</td>
+                <td class="px-3 py-2.5 text-right num">{fmtInt(s.count)}</td>
+                <td class="px-3 py-2.5 text-right num text-muted">{fmtInt(s.turns)}</td>
+                <td class="px-3 py-2.5 text-right num text-muted">{fmtInt(s.sessions)}</td>
+                <td class="px-3 py-2.5 text-right num">{fmtTok(s.tokens)}</td>
+                <td class="px-3 py-2.5">
+                  <div class="flex items-center gap-2">
+                    <div class="bar flex-1">
+                      <div class="fill" style="width: {maxSkillTokens > 0 ? (s.tokens / maxSkillTokens) * 100 : 0}%"></div>
+                    </div>
+                    <div class="num text-xs text-muted w-9 text-right shrink-0">
+                      {skillTotals.tokens > 0 ? fmtPct((s.tokens / skillTotals.tokens) * 100, 0) : "—"}
+                    </div>
+                  </div>
+                </td>
+                <td class="px-3 py-2.5 text-right num text-muted">{fmtUsd(s.cost_usd)}</td>
+                <td class="pl-3 pr-5 py-2.5 text-right num text-muted">{blockPct(s.tokens)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+  {:else if tab === "mcps"}
+    <div class="card !p-0 overflow-hidden">
+      <div class="px-5 py-4 border-b border-border flex items-center justify-between gap-4">
+        <div class="min-w-0">{@render statStrip(mcpTotals, loadingMcps)}</div>
+        <div class="flex gap-1 text-xs">
+          <button
+            class="px-2.5 py-1 rounded border {mcpGroup === 'tool' ? 'bg-panel2 text-ink border-border' : 'text-muted border-transparent hover:text-ink hover:border-border'}"
+            onclick={() => (mcpGroup = "tool")}
+          >by tool</button>
+          <button
+            class="px-2.5 py-1 rounded border {mcpGroup === 'server' ? 'bg-panel2 text-ink border-border' : 'text-muted border-transparent hover:text-ink hover:border-border'}"
+            onclick={() => (mcpGroup = "server")}
+          >by server</button>
+        </div>
+      </div>
+      {#if !loadingMcps && !mcpRows.length}
+        <div class="p-6 text-muted text-sm">No MCP tool calls in this range.</div>
+      {:else if !loadingMcps}
+        <table class="w-full text-sm table-fixed">
+          <thead>
+            <tr class="text-xs uppercase tracking-wider text-muted">
+              <th class="text-left font-normal px-5 py-2 w-[18%]">{mcpGroup === "tool" ? "Tool" : "Server"}</th>
+              <th class="text-left font-normal pr-3 py-2 w-[18%]">{mcpGroup === "tool" ? "Server" : ""}</th>
+              <th class="text-right font-normal px-3 py-2 w-[9%]">Calls</th>
+              <th class="text-right font-normal px-3 py-2 w-[9%]">Turns</th>
+              <th class="text-right font-normal px-3 py-2 w-[11%]">Tokens</th>
+              <th class="text-left font-normal px-3 py-2">Share</th>
+              <th class="text-right font-normal px-3 py-2 w-[12%]">Cost</th>
+              <th class="text-right font-normal pl-3 pr-5 py-2 w-[9%]">% block</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-border/40">
+            {#each mcpRows as m}
+              <tr class="hover:bg-panel2/60">
+                <td class="px-5 py-2.5 truncate text-ink font-mono" title={m.label}>{m.label}</td>
+                <td class="pr-3 py-2.5 truncate text-muted text-xs" title={m.sub}>{m.sub}</td>
+                <td class="px-3 py-2.5 text-right num">{fmtInt(m.count)}</td>
+                <td class="px-3 py-2.5 text-right num text-muted">{fmtInt(m.turns)}</td>
+                <td class="px-3 py-2.5 text-right num">{fmtTok(m.tokens)}</td>
+                <td class="px-3 py-2.5">
+                  <div class="flex items-center gap-2">
+                    <div class="bar flex-1">
+                      <div class="fill" style="width: {maxMcpTokens > 0 ? (m.tokens / maxMcpTokens) * 100 : 0}%"></div>
+                    </div>
+                    <div class="num text-xs text-muted w-9 text-right shrink-0">
+                      {mcpTotals.tokens > 0 ? fmtPct((m.tokens / mcpTotals.tokens) * 100, 0) : "—"}
+                    </div>
+                  </div>
+                </td>
+                <td class="px-3 py-2.5 text-right num text-muted">{fmtUsd(m.cost_usd)}</td>
+                <td class="pl-3 pr-5 py-2.5 text-right num text-muted">{blockPct(m.tokens)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+  {:else if tab === "slash"}
+    <div class="card !p-0 overflow-hidden">
+      <div class="px-5 py-4 border-b border-border">
+        {@render statStrip(slashTotals, loadingSlash)}
+      </div>
+      {#if !loadingSlash && !slashes.length}
+        <div class="p-6 text-muted text-sm">No slash commands in this range.</div>
+      {:else if !loadingSlash}
+        <table class="w-full text-sm table-fixed">
+          <thead>
+            <tr class="text-xs uppercase tracking-wider text-muted">
+              <th class="text-left font-normal px-5 py-2 w-[30%]">Command</th>
+              <th class="text-right font-normal px-3 py-2 w-[12%]">Uses</th>
+              <th class="text-right font-normal px-3 py-2 w-[14%]">Sessions</th>
+              <th class="text-left font-normal pl-3 pr-5 py-2">Share</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-border/40">
+            {#each slashes as s}
+              <tr class="hover:bg-panel2/60">
+                <td class="px-5 py-2.5 truncate text-ink font-mono" title={s.cmd}>{s.cmd}</td>
+                <td class="px-3 py-2.5 text-right num">{fmtInt(s.count)}</td>
+                <td class="px-3 py-2.5 text-right num text-muted">{fmtInt(s.sessions)}</td>
+                <td class="pl-3 pr-5 py-2.5">
+                  <div class="flex items-center gap-2">
+                    <div class="bar flex-1">
+                      <div class="fill" style="width: {maxSlashCount > 0 ? (s.count / maxSlashCount) * 100 : 0}%"></div>
+                    </div>
+                    <div class="num text-xs text-muted w-9 text-right shrink-0">
+                      {slashTotals.count > 0 ? fmtPct((s.count / slashTotals.count) * 100, 0) : "—"}
+                    </div>
+                  </div>
+                </td>
+              </tr>
             {/each}
           </tbody>
         </table>

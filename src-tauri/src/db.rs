@@ -63,6 +63,17 @@ impl Db {
                 session_id TEXT PRIMARY KEY,
                 title      TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS slash_commands (
+                id         INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                project    TEXT NOT NULL,
+                ts         TEXT NOT NULL,
+                cmd        TEXT NOT NULL,
+                UNIQUE(session_id, ts, cmd)
+            );
+            CREATE INDEX IF NOT EXISTS idx_slash_ts ON slash_commands(ts);
+            CREATE INDEX IF NOT EXISTS idx_slash_session ON slash_commands(session_id);
             "#,
         )?;
         // First time session_titles is empty but we already have messages: reset
@@ -77,6 +88,47 @@ impl Db {
         if need_backfill {
             self.conn.execute("DELETE FROM file_offsets", [])?;
         }
+
+        // tools_schema_version: bump when the tools_json shape changes so we
+        // re-parse historical JSONLs to backfill (skill identity, slash commands).
+        // Bumping this triggers a one-shot wipe of messages + offsets + slash_commands
+        // and the next refresh re-ingests everything.
+        const CURRENT_TOOLS_SCHEMA: i64 = 2;
+        let stored: i64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'tools_schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if stored < CURRENT_TOOLS_SCHEMA {
+            self.conn.execute_batch(
+                "DELETE FROM messages;
+                 DELETE FROM file_offsets;
+                 DELETE FROM slash_commands;",
+            )?;
+            self.conn.execute(
+                "INSERT INTO settings(key, value) VALUES('tools_schema_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![CURRENT_TOOLS_SCHEMA.to_string()],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn insert_slash_command(
+        &self,
+        session_id: &str,
+        project: &str,
+        ts: &str,
+        cmd: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO slash_commands(session_id, project, ts, cmd)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![session_id, project, ts, cmd],
+        )?;
         Ok(())
     }
 

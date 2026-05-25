@@ -77,6 +77,13 @@ fn ingest_file(db: &Db, path: &Path) -> Result<usize> {
             }
             continue;
         }
+        if kind == "user" {
+            if let Some(cmd) = extract_slash_command(&d) {
+                let ts = d.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                db.insert_slash_command(&session_id, &project, &ts, &cmd).ok();
+            }
+            continue;
+        }
         if kind != "assistant" {
             continue;
         }
@@ -117,6 +124,10 @@ fn ingest_file(db: &Db, path: &Path) -> Result<usize> {
                             let truncated: String = cmd.chars().take(500).collect();
                             entry["cmd"] = Value::String(truncated);
                         }
+                    } else if name == "Skill" {
+                        if let Some(s) = input.get("skill").and_then(|v| v.as_str()) {
+                            entry["skill"] = Value::String(s.to_string());
+                        }
                     }
                     tools.push(entry);
                 }
@@ -146,4 +157,40 @@ fn ingest_file(db: &Db, path: &Path) -> Result<usize> {
     tx.commit()?;
     db.set_offset(&path_str, bytes_consumed.min(end))?;
     Ok(count)
+}
+
+/// Pull a leading `/foo` slash command out of a `type:"user"` line, if present.
+/// User content can be either a plain string or a list of content blocks; the
+/// marker we look for is `<command-name>/foo</command-name>`. Returns the
+/// command including the leading `/`, lowercased and trimmed.
+fn extract_slash_command(d: &Value) -> Option<String> {
+    let msg = d.get("message")?;
+    let content = msg.get("content")?;
+    let scan = |s: &str| -> Option<String> {
+        let start = s.find("<command-name>")?;
+        let rest = &s[start + "<command-name>".len()..];
+        let end = rest.find("</command-name>")?;
+        let raw = rest[..end].trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let cmd = if raw.starts_with('/') {
+            raw.to_string()
+        } else {
+            format!("/{raw}")
+        };
+        Some(cmd)
+    };
+    match content {
+        Value::String(s) => scan(s),
+        Value::Array(blocks) => blocks.iter().find_map(|b| {
+            let t = b.get("type").and_then(|v| v.as_str())?;
+            if t != "text" {
+                return None;
+            }
+            let txt = b.get("text").and_then(|v| v.as_str())?;
+            scan(txt)
+        }),
+        _ => None,
+    }
 }
