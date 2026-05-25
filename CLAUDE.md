@@ -118,7 +118,7 @@ Health signals (positive checks, rendered as the "What's healthy" grid):
 - **Truncated text**: `min-w-0 flex-1 truncate` with `title={fullValue}` for hover.
 - **Project paths** display via `shortProject()` → `…/CloudDocs/Accounting` (last 2 segments).
 - **Model names**: strip `claude-` prefix in tight columns.
-- **Dark theme only.** Color tokens in `tailwind.config.js`: `bg`, `panel`, `panel2`, `border`, `ink`, `muted`, `accent`, `ok`, `warn`, `err`.
+- **Light + dark theme.** Toggle persisted in `localStorage["cc.theme"]`, managed by `theme` in [src/lib/store.svelte.ts](src/lib/store.svelte.ts); light mode applied via `:root.light` in [src/app.css](src/app.css). Color tokens in `tailwind.config.js`: `bg`, `panel`, `panel2`, `border`, `ink`, `muted`, `accent`, `ok`, `warn`, `err`.
 - **Card pattern**: `<div class="card"><div class="card-title">…</div>…</div>`.
 
 ## Performance notes
