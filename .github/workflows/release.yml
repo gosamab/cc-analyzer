@@ -120,3 +120,18 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
           includeUpdaterJson: true
+
+  publish-release:
+    needs: [create-release, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+              make_latest: 'true',
+            });
