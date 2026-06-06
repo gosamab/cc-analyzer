@@ -7,11 +7,13 @@
   import Donut from "../components/Donut.svelte";
   import Hint from "../components/Hint.svelte";
   import DatePicker from "../components/DatePicker.svelte";
+  import Heatmap from "../components/Heatmap.svelte";
   import { donutColor } from "../components/palette";
 
   let summary = $state<Summary | null>(null);
   let util = $state<Utilization | null>(null);
   let series = $state<DayRow[]>([]);
+  let heatmapSeries = $state<DayRow[]>([]);
   let recs = $state<Recommendation[]>([]);
   let healthy = $state<HealthSignal[]>([]);
   let block = $state<BlockUsage | null>(null);
@@ -67,6 +69,13 @@
 
     ipc.healthSignals(since, until)
       .then((h) => { if (mine === reqId) healthy = h; })
+      .catch(console.error);
+  });
+
+  // All-time heatmap data — fetches once, independent of range picker.
+  $effect(() => {
+    ipc.dailyBreakdown(daysAgo(364), today())
+      .then(d => heatmapSeries = d)
       .catch(console.error);
   });
 
@@ -386,6 +395,16 @@
         <div class="mt-2"><Sparkline values={turnSeries} /></div>
       </div>
     </div>
+
+    {#if heatmapSeries.length > 1}
+    <div class="card">
+      <div class="card-title">Activity heatmap · tokens</div>
+      <Heatmap
+        days={heatmapSeries.map(d => ({ day: d.day, value: d.tokens_total, secondary: fmtUsd(d.cost_usd) }))}
+        formatValue={fmtTok}
+      />
+    </div>
+    {/if}
 
     <div class="grid grid-cols-2 gap-4 items-start">
       <div class="card">
